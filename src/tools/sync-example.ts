@@ -1,9 +1,14 @@
 import { z } from "zod";
+import { isAbsolute } from "node:path";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
+import { validateProjectDir } from "../security/path-validator.js";
 
 export const SyncExampleSchema = z.object({
-  project_dir: z.string().describe("Absolute path to the project directory"),
+  project_dir: z
+    .string()
+    .refine((p) => isAbsolute(p), "project_dir must be an absolute path")
+    .describe("Absolute path to the project directory"),
 });
 
 function smartPlaceholder(key: string, value: string): string {
@@ -51,7 +56,12 @@ function parseExistingExample(
 
 export async function syncExample(
   args: z.infer<typeof SyncExampleSchema>
-): Promise<{ path: string; keys_synced: number }> {
+): Promise<{ path: string; keys_synced: number } | { error: string }> {
+  const pathCheck = validateProjectDir(args.project_dir);
+  if (!pathCheck.valid) {
+    return { error: pathCheck.reason! };
+  }
+
   const envPath = join(args.project_dir, ".env");
   const examplePath = join(args.project_dir, ".env.example");
 

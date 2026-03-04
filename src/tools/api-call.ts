@@ -1,9 +1,15 @@
 import { z } from "zod";
+import { isAbsolute } from "node:path";
 import { loadEnv } from "../env-loader.js";
 import { sanitize } from "../utils/sanitize.js";
+import { validateUrl } from "../security/url-validator.js";
+import { validateProjectDir } from "../security/path-validator.js";
 
 export const ApiCallSchema = z.object({
-  project_dir: z.string().describe("Absolute path to the project directory"),
+  project_dir: z
+    .string()
+    .refine((p) => isAbsolute(p), "project_dir must be an absolute path")
+    .describe("Absolute path to the project directory"),
   url: z.string().url().describe("Request URL"),
   method: z
     .enum(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"])
@@ -36,6 +42,22 @@ function interpolateHeaders(
 export async function apiCall(
   args: z.infer<typeof ApiCallSchema>
 ): Promise<{ status: number; headers: Record<string, string>; body: string }> {
+  // Path traversal protection
+  const pathCheck = validateProjectDir(args.project_dir);
+  if (!pathCheck.valid) {
+    return { status: 0, headers: {}, body: `Error: ${pathCheck.reason}` };
+  }
+
+  // SSRF protection: block requests to private/internal IPs
+  const urlCheck = await validateUrl(args.url);
+  if (!urlCheck.allowed) {
+    return {
+      status: 0,
+      headers: {},
+      body: `Request blocked: ${urlCheck.reason}`,
+    };
+  }
+
   const env = loadEnv(args.project_dir);
 
   const headers: Record<string, string> = args.headers
@@ -55,7 +77,7 @@ export async function apiCall(
   const bodyText = await response.text();
   const responseHeaders: Record<string, string> = {};
   response.headers.forEach((value, key) => {
-    responseHeaders[key] = value;
+    responseHeaders[key] = sanitize(value, env);
   });
 
   return {
