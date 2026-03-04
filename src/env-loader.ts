@@ -12,11 +12,22 @@ const cache = new Map<string, CacheEntry>();
 export function loadEnv(projectDir: string): Record<string, string> {
   const envPath = join(projectDir, ".env");
 
+  // Read the file first, then stat — avoids TOCTOU race where file
+  // could change between stat (mtime check) and read (content load)
+  let content: string;
+  try {
+    content = readFileSync(envPath, "utf-8");
+  } catch {
+    return {};
+  }
+
   let mtime: number;
   try {
     mtime = statSync(envPath).mtimeMs;
   } catch {
-    return {};
+    // File was deleted between read and stat — use what we read
+    const env = parse(content);
+    return env;
   }
 
   const cached = cache.get(envPath);
@@ -24,7 +35,6 @@ export function loadEnv(projectDir: string): Record<string, string> {
     return cached.env;
   }
 
-  const content = readFileSync(envPath, "utf-8");
   const env = parse(content);
   cache.set(envPath, { mtime, env });
   return env;
