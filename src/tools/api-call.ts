@@ -4,6 +4,7 @@ import { loadEnv } from "../env-loader.js";
 import { sanitize } from "../utils/sanitize.js";
 import { validateUrl } from "../security/url-validator.js";
 import { validateProjectDir } from "../security/path-validator.js";
+import { auditLog } from "../security/audit.js";
 
 export const ApiCallSchema = z.object({
   project_dir: z
@@ -45,12 +46,14 @@ export async function apiCall(
   // Path traversal protection
   const pathCheck = validateProjectDir(args.project_dir);
   if (!pathCheck.valid) {
+    auditLog("api_call", { status: "blocked" });
     return { status: 0, headers: {}, body: `Error: ${pathCheck.reason}` };
   }
 
   // SSRF protection: block requests to private/internal IPs
   const urlCheck = await validateUrl(args.url);
   if (!urlCheck.allowed) {
+    auditLog("api_call", { status: "blocked" });
     return {
       status: 0,
       headers: {},
@@ -78,6 +81,14 @@ export async function apiCall(
   const responseHeaders: Record<string, string> = {};
   response.headers.forEach((value, key) => {
     responseHeaders[key] = sanitize(value, env);
+  });
+
+  const headerCount =
+    Object.keys(headers).filter((h) => h.toLowerCase() === "authorization")
+      .length + (args.auth_env_key ? 1 : 0);
+  auditLog("api_call", {
+    keysAccessedCount: headerCount,
+    status: response.ok ? "success" : "error",
   });
 
   return {
