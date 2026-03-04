@@ -48,7 +48,7 @@ export async function apiCall(
     return { status: 0, headers: {}, body: `Error: ${pathCheck.reason}` };
   }
 
-  // SSRF protection: block requests to private/internal IPs
+  // SSRF protection: resolve DNS once and block private/internal IPs
   const urlCheck = await validateUrl(args.url);
   if (!urlCheck.allowed) {
     return {
@@ -68,7 +68,20 @@ export async function apiCall(
     headers["Authorization"] = `Bearer ${env[args.auth_env_key]}`;
   }
 
-  const response = await fetch(args.url, {
+  // Use the resolved IP to prevent DNS rebinding attacks:
+  // An attacker's DNS could return a safe IP during validation above,
+  // then a private IP (127.0.0.1, 169.254.169.254) during fetch.
+  // By rewriting the URL with the resolved IP and setting Host header,
+  // we ensure fetch uses the same IP we validated.
+  let fetchUrl = args.url;
+  if (urlCheck.resolvedIp && urlCheck.hostname) {
+    const parsed = new URL(args.url);
+    parsed.hostname = urlCheck.resolvedIp;
+    fetchUrl = parsed.toString();
+    headers["Host"] = urlCheck.hostname;
+  }
+
+  const response = await fetch(fetchUrl, {
     method: args.method,
     headers,
     body: args.body,

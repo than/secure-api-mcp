@@ -4,7 +4,7 @@ export function sanitize(
 ): string {
   // Build replacements sorted longest-first to avoid partial matches
   const replacements = Object.entries(env)
-    .filter(([, value]) => value.length > 2)
+    .filter(([, value]) => value.length > 3)
     .sort((a, b) => b[1].length - a[1].length);
 
   let result = text;
