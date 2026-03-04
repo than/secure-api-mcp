@@ -1,0 +1,66 @@
+name: Claude Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+jobs:
+  claude-review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: read
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Run Claude Code Review
+        id: claude-review
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            You are an expert TypeScript and security-focused code reviewer for an MCP server that handles secrets. Read CLAUDE.md first if it exists — it defines project conventions.
+
+            This project is a secure secret proxy MCP server for Claude Code. Its core job is to inject secrets at runtime and sanitize all output so secret values never leak. Security is paramount.
+
+            Review this PR with the rigor of a senior security engineer. Focus on:
+
+            **Security (highest priority):**
+            - Secret values must NEVER appear in tool output — verify sanitization covers all paths
+            - No new vectors for secret leakage (encoded forms, response headers, error messages, stack traces)
+            - No path traversal, SSRF, or command injection vulnerabilities
+            - No secrets in logs, error messages, or debug output
+            - Sanitization applied to ALL output before returning to Claude
+
+            **TypeScript quality:**
+            - Proper use of types (no unnecessary `any`, proper generics)
+            - Zod schemas validate all external input correctly
+            - Async/await used properly, no unhandled promise rejections
+            - Node.js APIs used correctly (child_process, fs, fetch)
+
+            **Architecture:**
+            - Follows existing patterns (tools in src/tools/, utils in src/utils/)
+            - No unnecessary abstractions or over-engineering
+            - Changes are minimal and focused on the PR's stated purpose
+
+            **What NOT to flag:**
+            - Don't suggest features or refactors beyond the PR scope
+            - Don't nitpick formatting
+            - Don't flag intentional design decisions
+
+            Be direct and constructive. If the PR is solid, say so briefly. If there are real problems, be specific about what's wrong and what the fix should be.
+
+            IMPORTANT: Do NOT use #N (e.g. #1, #2, #3) to number your feedback items — GitHub auto-links #N to issue numbers. Use bullet points, letters (a, b, c), or descriptive headers instead.
+
+            Use `gh pr comment` with your Bash tool to leave your review as a comment on the PR.
+
+          claude_args: '--model opus --allowed-tools "Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue list:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*),Bash(npm run build:*),Bash(npm test:*)"'
