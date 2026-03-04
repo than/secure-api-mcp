@@ -4,6 +4,7 @@ import { execFile } from "node:child_process";
 import { loadEnv } from "../env-loader.js";
 import { sanitize } from "../utils/sanitize.js";
 import { validateProjectDir } from "../security/path-validator.js";
+import { auditLog } from "../security/audit.js";
 
 export const RunWithEnvSchema = z.object({
   project_dir: z
@@ -22,15 +23,59 @@ export const RunWithEnvSchema = z.object({
     .describe("Command timeout in milliseconds"),
 });
 
+// Binaries that can exfiltrate data over the network
+const NETWORK_BINARIES = [
+  "curl", "wget", "nc", "ncat", "netcat", "ssh", "scp", "sftp",
+  "dig", "nslookup", "host", "telnet", "ftp",
+];
+
+// Patterns that indicate data exfiltration attempts
+const EXFIL_PATTERNS = [
+  /\|\s*curl\b/,    // piping to curl
+  /\|\s*wget\b/,    // piping to wget
+  /\|\s*nc\b/,      // piping to netcat
+  />\s*\/dev\/tcp/,  // bash /dev/tcp exfil
+  />\s*\/dev\/udp/,  // bash /dev/udp exfil
+];
+
+function detectCommandWarnings(command: string): string[] {
+  const warnings: string[] = [];
+  const lower = command.toLowerCase();
+
+  for (const binary of NETWORK_BINARIES) {
+    // Match the binary as a standalone word
+    const regex = new RegExp(`\\b${binary}\\b`);
+    if (regex.test(lower)) {
+      warnings.push(
+        `Command uses network-capable binary '${binary}' — secrets could be sent to external servers`
+      );
+    }
+  }
+
+  for (const pattern of EXFIL_PATTERNS) {
+    if (pattern.test(command)) {
+      warnings.push(
+        `Command matches data exfiltration pattern — review carefully before use`
+      );
+      break; // One exfil warning is enough
+    }
+  }
+
+  return warnings;
+}
+
 export async function runWithEnv(
   args: z.infer<typeof RunWithEnvSchema>
 ): Promise<
-  { exit_code: number; stdout: string; stderr: string } | { error: string }
+  { exit_code: number; stdout: string; stderr: string; warnings?: string[] } | { error: string }
 > {
   const pathCheck = validateProjectDir(args.project_dir);
   if (!pathCheck.valid) {
+    auditLog("run_with_env", { command: args.command, status: "blocked" });
     return { error: pathCheck.reason! };
   }
+
+  const warnings = detectCommandWarnings(args.command);
 
   const env = loadEnv(args.project_dir);
 
@@ -56,10 +101,16 @@ export async function runWithEnv(
       (error, stdout, stderr) => {
         const exitCode =
           error && "code" in error ? (error.code as number) ?? 1 : 0;
+        auditLog("run_with_env", {
+          keysAccessedCount: Object.keys(injectedEnv).length,
+          command: args.command,
+          status: exitCode === 0 ? "success" : "error",
+        });
         resolve({
           exit_code: exitCode,
           stdout: sanitize(stdout, env),
           stderr: sanitize(stderr, env),
+          ...(warnings.length > 0 ? { warnings } : {}),
         });
       }
     );

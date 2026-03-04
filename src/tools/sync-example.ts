@@ -3,6 +3,7 @@ import { isAbsolute } from "node:path";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { validateProjectDir } from "../security/path-validator.js";
+import { auditLog } from "../security/audit.js";
 
 export const SyncExampleSchema = z.object({
   project_dir: z
@@ -11,18 +12,29 @@ export const SyncExampleSchema = z.object({
     .describe("Absolute path to the project directory"),
 });
 
+// Keys where numeric values are safe to preserve (non-sensitive config)
+const SAFE_NUMERIC_KEYS =
+  /^(PORT|TIMEOUT|RETRIES|MAX_|MIN_|SIZE|LIMIT|WORKERS|THREADS|POOL|BATCH|INTERVAL|DELAY|TTL|DURATION|CONCURRENCY|BACKOFF)/i;
+
 function smartPlaceholder(key: string, value: string): string {
   // URLs keep URL shape
   if (/^https?:\/\//.test(value)) return "https://example.com";
-  // Booleans
-  if (value === "true" || value === "false") return value;
-  // Pure numbers
-  if (/^\d+$/.test(value)) return value;
+  // Booleans — only for clearly non-sensitive flag keys
+  if (
+    (value === "true" || value === "false") &&
+    /^(ENABLE|USE|IS_|HAS_|ALLOW|DEBUG|VERBOSE|STRICT|FORCE)/i.test(key)
+  ) {
+    return value;
+  }
+  // Pure numbers — only preserve for clearly non-sensitive keys
+  if (/^\d+$/.test(value) && SAFE_NUMERIC_KEYS.test(key)) {
+    return value;
+  }
   // Port-like
   if (key.toLowerCase().includes("port") && /^\d+$/.test(value)) return value;
   // Empty
   if (value === "") return "";
-  // Default
+  // Default — don't leak potentially sensitive values
   return "";
 }
 
@@ -59,6 +71,7 @@ export async function syncExample(
 ): Promise<{ path: string; keys_synced: number } | { error: string }> {
   const pathCheck = validateProjectDir(args.project_dir);
   if (!pathCheck.valid) {
+    auditLog("sync_env_example", { status: "blocked" });
     return { error: pathCheck.reason! };
   }
 
@@ -109,5 +122,6 @@ export async function syncExample(
   }
 
   writeFileSync(examplePath, outputLines.join("\n") + "\n");
+  auditLog("sync_env_example", { keysAccessedCount: keysCount, status: "success" });
   return { path: examplePath, keys_synced: keysCount };
 }

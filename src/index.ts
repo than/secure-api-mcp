@@ -22,7 +22,7 @@ server.tool(
 
 server.tool(
   "run_with_env",
-  "Runs a shell command with .env variables injected into the process environment. Output is sanitized — secret values are replaced with [REDACTED:KEY_NAME].",
+  "Runs a shell command with .env variables injected into the process environment. Output is sanitized — secret values are replaced with opaque [REDACTED:N] placeholders.",
   RunWithEnvSchema.shape,
   async (args) => {
     const result = await runWithEnv(args);
