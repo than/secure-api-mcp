@@ -31,13 +31,26 @@ export async function runWithEnv(
     }
   }
 
+  // Only pass through safe, non-secret process env vars needed for commands to work.
+  // This prevents the MCP server's own environment secrets from leaking unsanitized.
+  const safeProcessEnv: Record<string, string> = {};
+  const SAFE_KEYS = [
+    "PATH", "HOME", "SHELL", "USER", "LOGNAME", "TERM", "LANG",
+    "LC_ALL", "LC_CTYPE", "TMPDIR", "XDG_RUNTIME_DIR",
+  ];
+  for (const key of SAFE_KEYS) {
+    if (process.env[key]) {
+      safeProcessEnv[key] = process.env[key] as string;
+    }
+  }
+
   return new Promise((resolve) => {
     const child = execFile(
       "/bin/sh",
       ["-c", args.command],
       {
         cwd: args.project_dir,
-        env: { ...process.env, ...injectedEnv },
+        env: { ...safeProcessEnv, ...injectedEnv },
         timeout: args.timeout_ms,
         maxBuffer: 1024 * 1024,
       },
