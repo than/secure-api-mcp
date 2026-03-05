@@ -1,10 +1,15 @@
 import { z } from "zod";
+import { isAbsolute } from "node:path";
 import { execFile } from "node:child_process";
 import { loadEnv } from "../env-loader.js";
 import { sanitize } from "../utils/sanitize.js";
+import { validateProjectDir } from "../security/path-validator.js";
 
 export const RunWithEnvSchema = z.object({
-  project_dir: z.string().describe("Absolute path to the project directory"),
+  project_dir: z
+    .string()
+    .refine((p) => isAbsolute(p), "project_dir must be an absolute path")
+    .describe("Absolute path to the project directory"),
   command: z.string().describe("Shell command to execute"),
   env_keys: z
     .array(z.string())
@@ -19,7 +24,14 @@ export const RunWithEnvSchema = z.object({
 
 export async function runWithEnv(
   args: z.infer<typeof RunWithEnvSchema>
-): Promise<{ exit_code: number; stdout: string; stderr: string }> {
+): Promise<
+  { exit_code: number; stdout: string; stderr: string } | { error: string }
+> {
+  const pathCheck = validateProjectDir(args.project_dir);
+  if (!pathCheck.valid) {
+    return { error: pathCheck.reason! };
+  }
+
   const env = loadEnv(args.project_dir);
 
   // Filter to requested keys if specified
