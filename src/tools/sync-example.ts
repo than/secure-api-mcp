@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { isAbsolute } from "node:path";
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, realpathSync, openSync, closeSync, renameSync, constants } from "node:fs";
 import { join } from "node:path";
 import { validateProjectDir } from "../security/path-validator.js";
 import { auditLog } from "../security/audit.js";
@@ -82,8 +82,32 @@ export async function syncExample(
     return { path: examplePath, keys_synced: 0 };
   }
 
+  // Read .env with O_NOFOLLOW to close the TOCTOU window between a symlink check
+  // and the read. If the open throws ELOOP, the file is a symlink — validate the
+  // target stays within the project before re-opening normally.
+  let envContent: string;
+  let fd: number;
+  try {
+    fd = openSync(envPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch (e: unknown) {
+    const err = e as NodeJS.ErrnoException;
+    if (err.code !== "ELOOP") throw e;
+    // .env is a symlink — block if it resolves outside the project
+    const realEnv = realpathSync(envPath);
+    const realProject = realpathSync(args.project_dir);
+    if (!realEnv.startsWith(realProject + "/") && realEnv !== realProject) {
+      auditLog("sync_env_example", { status: "blocked" });
+      return { error: "Refusing to read .env: symlink points outside project directory" };
+    }
+    fd = openSync(realEnv, constants.O_RDONLY);
+  }
+  try {
+    envContent = readFileSync(fd, "utf-8");
+  } finally {
+    closeSync(fd);
+  }
+
   const existing = parseExistingExample(examplePath);
-  const envContent = readFileSync(envPath, "utf-8");
   const lines = envContent.split("\n");
   const outputLines: string[] = [];
   let keysCount = 0;
@@ -121,7 +145,12 @@ export async function syncExample(
     keysCount++;
   }
 
-  writeFileSync(examplePath, outputLines.join("\n") + "\n");
+  // Write atomically via temp file + rename. renameSync replaces the destination
+  // path itself (including symlinks) rather than following it, closing both the
+  // TOCTOU window and any symlink traversal on .env.example.
+  const tmpPath = join(args.project_dir, ".env.example.tmp");
+  writeFileSync(tmpPath, outputLines.join("\n") + "\n");
+  renameSync(tmpPath, examplePath);
   auditLog("sync_env_example", { keysAccessedCount: keysCount, status: "success" });
   return { path: examplePath, keys_synced: keysCount };
 }
