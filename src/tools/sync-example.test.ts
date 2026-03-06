@@ -55,6 +55,17 @@ describe("syncExample - symlink traversal protection", () => {
     expect(result).toMatchObject({ error: expect.stringMatching(/outside/i) });
   });
 
+  it("treats a dangling .env symlink as no .env (existsSync returns false)", async () => {
+    const project = tempProject();
+    symlinkSync(join(project, "nonexistent-file"), join(project, ".env"));
+
+    const result = await syncExample({ project_dir: project });
+
+    // existsSync follows the symlink and sees no target — graceful no-op,
+    // no unhandled throw from realpathSync
+    expect(result).toMatchObject({ keys_synced: 0 });
+  });
+
   it("allows .env that is a symlink pointing within the project", async () => {
     const project = tempProject();
     writeFileSync(join(project, ".env.production"), "API_KEY=secret\n");
