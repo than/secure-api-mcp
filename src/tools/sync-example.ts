@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { isAbsolute } from "node:path";
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, realpathSync, lstatSync } from "node:fs";
 import { join } from "node:path";
 import { validateProjectDir } from "../security/path-validator.js";
 import { auditLog } from "../security/audit.js";
@@ -80,6 +80,17 @@ export async function syncExample(
 
   if (!existsSync(envPath)) {
     return { path: examplePath, keys_synced: 0 };
+  }
+
+  // Symlink traversal protection: if .env.example already exists as a symlink,
+  // resolve it and confirm the real path stays within the project directory.
+  if (existsSync(examplePath) && lstatSync(examplePath).isSymbolicLink()) {
+    const realTarget = realpathSync(examplePath);
+    const realProject = realpathSync(args.project_dir);
+    if (!realTarget.startsWith(realProject + "/") && realTarget !== realProject) {
+      auditLog("sync_env_example", { status: "blocked" });
+      return { error: "Refusing to write .env.example: symlink points outside project directory" };
+    }
   }
 
   const existing = parseExistingExample(examplePath);
