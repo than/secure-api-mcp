@@ -99,7 +99,7 @@ export async function syncExample(
       auditLog("sync_env_example", { status: "blocked" });
       return { error: "Refusing to read .env: symlink points outside project directory" };
     }
-    fd = openSync(envPath, constants.O_RDONLY);
+    fd = openSync(realEnv, constants.O_RDONLY);
   }
   try {
     envContent = readFileSync(fd, "utf-8");
