@@ -48,12 +48,21 @@ describe("syncExample - symlink traversal protection", () => {
     const externalFile = join(external, "arbitrary-file.txt");
     writeFileSync(externalFile, "root:x:0:0:root:/root:/bin/bash\n");
 
-    // .env is the symlink — reading it would leak arbitrary file contents as key names
     symlinkSync(externalFile, join(project, ".env"));
 
     const result = await syncExample({ project_dir: project });
 
     expect(result).toMatchObject({ error: expect.stringMatching(/outside/i) });
+  });
+
+  it("allows .env that is a symlink pointing within the project", async () => {
+    const project = tempProject();
+    writeFileSync(join(project, ".env.production"), "API_KEY=secret\n");
+    symlinkSync(join(project, ".env.production"), join(project, ".env"));
+
+    const result = await syncExample({ project_dir: project });
+
+    expect(result).toMatchObject({ keys_synced: 1 });
   });
 });
 
