@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { isAbsolute } from "node:path";
-import { readFileSync, writeFileSync, existsSync, realpathSync, lstatSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, realpathSync, lstatSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { validateProjectDir } from "../security/path-validator.js";
 import { auditLog } from "../security/audit.js";
@@ -82,14 +82,14 @@ export async function syncExample(
     return { path: examplePath, keys_synced: 0 };
   }
 
-  // Symlink traversal protection: if .env.example already exists as a symlink,
-  // resolve it and confirm the real path stays within the project directory.
-  if (existsSync(examplePath) && lstatSync(examplePath).isSymbolicLink()) {
-    const realTarget = realpathSync(examplePath);
+  // Block if .env itself is a symlink pointing outside the project — reading it
+  // could expose arbitrary file contents (as key names) in .env.example.
+  if (lstatSync(envPath).isSymbolicLink()) {
+    const realEnv = realpathSync(envPath);
     const realProject = realpathSync(args.project_dir);
-    if (!realTarget.startsWith(realProject + "/") && realTarget !== realProject) {
+    if (!realEnv.startsWith(realProject + "/") && realEnv !== realProject) {
       auditLog("sync_env_example", { status: "blocked" });
-      return { error: "Refusing to write .env.example: symlink points outside project directory" };
+      return { error: "Refusing to read .env: symlink points outside project directory" };
     }
   }
 
@@ -132,7 +132,12 @@ export async function syncExample(
     keysCount++;
   }
 
-  writeFileSync(examplePath, outputLines.join("\n") + "\n");
+  // Write atomically via temp file + rename. renameSync replaces the destination
+  // path itself (including symlinks) rather than following it, closing both the
+  // TOCTOU window and any symlink traversal on .env.example.
+  const tmpPath = join(args.project_dir, ".env.example.tmp");
+  writeFileSync(tmpPath, outputLines.join("\n") + "\n");
+  renameSync(tmpPath, examplePath);
   auditLog("sync_env_example", { keysAccessedCount: keysCount, status: "success" });
   return { path: examplePath, keys_synced: keysCount };
 }

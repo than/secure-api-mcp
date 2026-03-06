@@ -1,12 +1,11 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, symlinkSync, rmSync, readFileSync, lstatSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { syncExample } from "./sync-example.js";
 
 function makeTempProject(): string {
   const dir = mkdtempSync(join(tmpdir(), "secure-api-test-"));
-  // Minimal project marker
   writeFileSync(join(dir, "package.json"), "{}");
   return dir;
 }
@@ -25,23 +24,36 @@ afterEach(() => {
 });
 
 describe("syncExample - symlink traversal protection", () => {
-  it("refuses to write .env.example when it is a symlink pointing outside the project", async () => {
+  it("atomically replaces .env.example symlink without writing to its target", async () => {
     const project = tempProject();
-    const target = tempProject();
-    const targetFile = join(target, "sensitive-file.txt");
+    const external = tempProject();
+    const targetFile = join(external, "sensitive-file.txt");
     writeFileSync(targetFile, "original content");
-
-    // .env exists so syncExample has something to work with
     writeFileSync(join(project, ".env"), "API_KEY=secret123\n");
-
-    // Pre-create .env.example as a symlink to a file outside the project
     symlinkSync(targetFile, join(project, ".env.example"));
 
     const result = await syncExample({ project_dir: project });
 
-    expect(result).toMatchObject({ error: expect.stringMatching(/outside/i) });
-    // The target file must not have been overwritten
+    // Should succeed — rename replaces the symlink, not its target
+    expect(result).toMatchObject({ keys_synced: 1 });
+    // External target must be untouched
     expect(readFileSync(targetFile, "utf-8")).toBe("original content");
+    // .env.example should now be a real file, not a symlink
+    expect(lstatSync(join(project, ".env.example")).isSymbolicLink()).toBe(false);
+  });
+
+  it("blocks when .env is a symlink pointing outside the project", async () => {
+    const project = tempProject();
+    const external = tempProject();
+    const externalFile = join(external, "arbitrary-file.txt");
+    writeFileSync(externalFile, "root:x:0:0:root:/root:/bin/bash\n");
+
+    // .env is the symlink — reading it would leak arbitrary file contents as key names
+    symlinkSync(externalFile, join(project, ".env"));
+
+    const result = await syncExample({ project_dir: project });
+
+    expect(result).toMatchObject({ error: expect.stringMatching(/outside/i) });
   });
 });
 
