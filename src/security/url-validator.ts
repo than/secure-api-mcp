@@ -41,25 +41,50 @@ function isPrivateIpv4(ip: number): boolean {
 /**
  * Check if an IP address string is private/reserved.
  * Handles IPv4, IPv6 loopback, and IPv6 private ranges.
+ * Input must be a bare address without brackets.
  */
 function isPrivateIp(ip: string): boolean {
   // IPv6 loopback
   if (ip === "::1") return true;
-  // IPv6 link-local
+  // IPv6 link-local (fe80::/10)
   if (ip.toLowerCase().startsWith("fe80:")) return true;
-  // IPv6 unique local (fc00::/7)
+  // IPv6 unique local (fc00::/7 — covers fc:: and fd::)
   if (/^f[cd]/i.test(ip)) return true;
-  // IPv4-mapped IPv6 (::ffff:x.x.x.x)
+  // IPv6 NAT64 translation prefix (64:ff9b::/96 — maps to IPv4 space)
+  if (/^64:ff9b:/i.test(ip)) return true;
+  // IPv6 discard prefix (100::/64)
+  if (/^0*100:/i.test(ip)) return true;
+  // IPv4-mapped IPv6 — dotted-decimal form: ::ffff:x.x.x.x
   const v4mapped = ip.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i);
   if (v4mapped) {
     const parsed = parseIpv4(v4mapped[1]);
     if (parsed !== null) return isPrivateIpv4(parsed);
+  }
+  // IPv4-mapped IPv6 — hex form after URL normalization: ::ffff:xxxx:xxxx
+  // e.g. URL parser converts ::ffff:127.0.0.1 → ::ffff:7f00:1
+  const v4mappedHex = ip.match(/^::ffff:([0-9a-f]+):([0-9a-f]+)$/i);
+  if (v4mappedHex) {
+    const high = parseInt(v4mappedHex[1], 16);
+    const low = parseInt(v4mappedHex[2], 16);
+    const ipNum = (((high << 16) | low) >>> 0);
+    return isPrivateIpv4(ipNum);
   }
   // Plain IPv4
   const parsed = parseIpv4(ip);
   if (parsed !== null) return isPrivateIpv4(parsed);
 
   return false;
+}
+
+/**
+ * Strip IPv6 brackets from a URL hostname.
+ * URL.hostname returns "[::1]" for IPv6 literals — we need "::1" for isPrivateIp.
+ */
+function stripBrackets(hostname: string): string {
+  if (hostname.startsWith("[") && hostname.endsWith("]")) {
+    return hostname.slice(1, -1);
+  }
+  return hostname;
 }
 
 export interface ValidatedUrl {
@@ -93,9 +118,12 @@ export async function validateUrl(url: string): Promise<ValidatedUrl> {
   }
 
   const hostname = parsed.hostname;
+  // URL.hostname includes brackets for IPv6 literals (e.g., "[::1]") —
+  // strip them before IP checks and DNS lookup.
+  const bareHostname = stripBrackets(hostname);
 
   // Check if hostname is already a literal IP
-  if (isPrivateIp(hostname)) {
+  if (isPrivateIp(bareHostname)) {
     return {
       allowed: false,
       reason: "Blocked: request to private/internal IP address",
@@ -104,14 +132,14 @@ export async function validateUrl(url: string): Promise<ValidatedUrl> {
 
   // Resolve hostname and check the resolved IP
   try {
-    const { address } = await lookup(hostname);
+    const { address } = await lookup(bareHostname);
     if (isPrivateIp(address)) {
       return {
         allowed: false,
         reason: `Blocked: ${hostname} resolves to private IP ${address}`,
       };
     }
-    return { allowed: true, resolvedIp: address, hostname };
+    return { allowed: true, resolvedIp: address, hostname: bareHostname };
   } catch {
     return {
       allowed: false,
