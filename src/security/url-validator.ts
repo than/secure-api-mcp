@@ -46,8 +46,8 @@ function isPrivateIpv4(ip: number): boolean {
 function isPrivateIp(ip: string): boolean {
   // IPv6 loopback
   if (ip === "::1") return true;
-  // IPv6 link-local (fe80::/10)
-  if (ip.toLowerCase().startsWith("fe80:")) return true;
+  // IPv6 link-local (fe80::/10 — covers fe80:: through febf::)
+  if (/^fe[89ab][0-9a-f]:/i.test(ip)) return true;
   // IPv6 unique local (fc00::/7 — covers fc:: and fd::)
   if (/^f[cd]/i.test(ip)) return true;
   // IPv6 NAT64 translation prefix (64:ff9b::/96 — maps to IPv4 space)

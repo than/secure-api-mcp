@@ -37,6 +37,21 @@ describe("validateUrl - existing IPv6 coverage (regression)", () => {
     expect(result.allowed).toBe(false);
   });
 
+  it("blocks fe90:: link-local (fe80::/10 range)", async () => {
+    const result = await validateUrl("http://[fe90::1]");
+    expect(result.allowed).toBe(false);
+  });
+
+  it("blocks fea0:: link-local (fe80::/10 range)", async () => {
+    const result = await validateUrl("http://[fea0::1]");
+    expect(result.allowed).toBe(false);
+  });
+
+  it("blocks feb0:: link-local (fe80::/10 range)", async () => {
+    const result = await validateUrl("http://[feb0::1]");
+    expect(result.allowed).toBe(false);
+  });
+
   it("blocks fc00:: unique local", async () => {
     const result = await validateUrl("http://[fc00::1]");
     expect(result.allowed).toBe(false);
