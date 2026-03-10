@@ -96,11 +96,18 @@ export async function apiCall(
     responseHeaders[key] = sanitize(value, env);
   });
 
-  const headerCount =
-    Object.keys(headers).filter((h) => h.toLowerCase() === "authorization")
-      .length + (args.auth_env_key ? 1 : 0);
+  // Count unique env keys actually accessed: {{KEY}} templates in headers
+  // plus auth_env_key. Using a Set deduplicates when the same key appears
+  // in both (e.g. Authorization: "{{MY_TOKEN}}" + auth_env_key: "MY_TOKEN").
+  const templateKeys = Object.values(args.headers ?? {}).flatMap((v) =>
+    [...v.matchAll(/\{\{(\w+)\}\}/g)].map((m) => m[1])
+  );
+  const keysAccessed = new Set([
+    ...templateKeys,
+    ...(args.auth_env_key ? [args.auth_env_key] : []),
+  ]).size;
   auditLog("api_call", {
-    keysAccessedCount: headerCount,
+    keysAccessedCount: keysAccessed,
     status: response.ok ? "success" : "error",
   });
 
