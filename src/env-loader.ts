@@ -1,9 +1,11 @@
 import { readFileSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { parse } from "dotenv";
 
 interface CacheEntry {
   mtime: number;
+  contentHash: string;
   env: Record<string, string>;
 }
 
@@ -26,17 +28,20 @@ export function loadEnv(projectDir: string): Record<string, string> {
     mtime = statSync(envPath).mtimeMs;
   } catch {
     // File was deleted between read and stat — use what we read
-    const env = parse(content);
-    return env;
+    return parse(content);
   }
 
+  // Hash the content so identical-mtime replacements (coarse clock,
+  // touch -t, secret rotation scripts) are still detected.
+  const contentHash = createHash("sha256").update(content).digest("hex");
+
   const cached = cache.get(envPath);
-  if (cached && cached.mtime === mtime) {
+  if (cached && cached.mtime === mtime && cached.contentHash === contentHash) {
     return cached.env;
   }
 
   const env = parse(content);
-  cache.set(envPath, { mtime, env });
+  cache.set(envPath, { mtime, contentHash, env });
   return env;
 }
 
