@@ -54,6 +54,18 @@ function isPrivateIp(ip: string): boolean {
   if (/^64:ff9b:/i.test(ip)) return true;
   // IPv6 discard prefix (100::/64)
   if (/^0*100:/i.test(ip)) return true;
+  // 6to4 (2002::/16) — embeds IPv4 in bits 17-48 (hex groups 2 and 3)
+  // e.g. 2002:7f00:0001:: encodes 127.0.0.1
+  const sixToFour = ip.match(/^2002:([0-9a-f]{1,4}):([0-9a-f]{1,4}):/i);
+  if (sixToFour) {
+    const high = parseInt(sixToFour[1], 16);
+    const low = parseInt(sixToFour[2], 16);
+    const ipNum = (((high << 16) | low) >>> 0);
+    if (isPrivateIpv4(ipNum)) return true;
+  }
+  // Teredo (2001:0000::/32) and documentation range (2001:db8::/32).
+  // URL parser normalizes 2001:0000::1 → 2001::1, so match 0* (including empty).
+  if (/^2001:(0*:|db8:)/i.test(ip)) return true;
   // IPv4-mapped IPv6 — dotted-decimal form: ::ffff:x.x.x.x
   const v4mapped = ip.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i);
   if (v4mapped) {

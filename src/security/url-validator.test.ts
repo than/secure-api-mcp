@@ -24,6 +24,44 @@ describe("validateUrl - IPv6 private ranges (missing coverage)", () => {
     const result = await validateUrl("http://[100::1]");
     expect(result.allowed).toBe(false);
   });
+
+  // 6to4: 2002::/16 — encodes IPv4 in bits 17-48 (groups 2 and 3)
+  it("blocks 2002:7f00:1:: (6to4 encoding of 127.0.0.1)", async () => {
+    const result = await validateUrl("http://[2002:7f00:1::]");
+    expect(result.allowed).toBe(false);
+  });
+
+  it("blocks 2002:c0a8:101:: (6to4 encoding of 192.168.1.1)", async () => {
+    const result = await validateUrl("http://[2002:c0a8:101::]");
+    expect(result.allowed).toBe(false);
+  });
+
+  it("blocks 2002:a00:1:: (6to4 encoding of 10.0.0.1)", async () => {
+    const result = await validateUrl("http://[2002:a00:1::]");
+    expect(result.allowed).toBe(false);
+  });
+
+  it("allows 2002:0808:0808:: (6to4 encoding of public 8.8.8.8)", async () => {
+    const result = await validateUrl("http://[2002:808:808::]");
+    expect(result.allowed).toBe(true);
+  });
+
+  // Teredo: 2001:0000::/32
+  it("blocks 2001:0000:: Teredo prefix", async () => {
+    const result = await validateUrl("http://[2001:0000::1]");
+    expect(result.allowed).toBe(false);
+  });
+
+  it("blocks 2001:: Teredo prefix (abbreviated)", async () => {
+    const result = await validateUrl("http://[2001::1]");
+    expect(result.allowed).toBe(false);
+  });
+
+  // 2001:db8::/32 is documentation range — safe to block
+  it("blocks 2001:db8:: documentation prefix", async () => {
+    const result = await validateUrl("http://[2001:db8::1]");
+    expect(result.allowed).toBe(false);
+  });
 });
 
 describe("validateUrl - existing IPv6 coverage (regression)", () => {
