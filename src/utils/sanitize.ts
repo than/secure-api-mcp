@@ -10,10 +10,9 @@ export function sanitize(
     .sort((a, b) => b[1].length - a[1].length);
 
   let result = text;
-  let index = 1;
 
-  for (const [, value] of replacements) {
-    const tag = `[REDACTED:${index}]`;
+  for (const [key, value] of replacements) {
+    const tag = `[REDACTED:${key}]`;
 
     // Match the literal secret value
     result = result.split(value).join(tag);
@@ -29,8 +28,6 @@ export function sanitize(
     if (urlEncoded !== value) {
       result = result.split(urlEncoded).join(tag);
     }
-
-    index++;
   }
 
   // Second pass: scan for common secret patterns not in .env
