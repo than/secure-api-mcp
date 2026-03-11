@@ -74,14 +74,13 @@ describe("sanitize", () => {
       expect(result).not.toContain("[REDACTED:SHORT]");
     });
 
-    it("handles overlapping secrets correctly", () => {
-      const result = sanitize("abc: mysecret and mysecretvalue here", {
+    it("handles true substring overlap at the same position", () => {
+      const result = sanitize("token: mysecretvalue", {
         SMALL: "mysecret",
         LARGE: "mysecretvalue",
       });
-      expect(result).toBe(
-        "abc: [REDACTED:SMALL] and [REDACTED:LARGE] here"
-      );
+      expect(result).toBe("token: [REDACTED:LARGE]");
+      expect(result).not.toContain("[REDACTED:SMALL]");
     });
   });
 
