@@ -65,6 +65,12 @@ describe("scanForSecrets", () => {
       const result = scanForSecrets(`stripe: ${key}`);
       expect(result).toBe("stripe: [REDACTED:detected]");
     });
+
+    it("redacts rk_test_ restricted keys", () => {
+      const key = "rk_test_" + "d".repeat(24);
+      const result = scanForSecrets(`stripe: ${key}`);
+      expect(result).toBe("stripe: [REDACTED:detected]");
+    });
   });
 
   describe("JWTs", () => {
@@ -89,6 +95,16 @@ describe("scanForSecrets", () => {
 
     it("redacts xoxa- app tokens", () => {
       const result = scanForSecrets("token: xoxa-abc-123-xyzxyzxyz");
+      expect(result).toBe("token: [REDACTED:detected]");
+    });
+
+    it("redacts xoxr- tokens", () => {
+      const result = scanForSecrets("token: xoxr-abc-123-xyzxyzxyz");
+      expect(result).toBe("token: [REDACTED:detected]");
+    });
+
+    it("redacts xoxs- tokens", () => {
+      const result = scanForSecrets("token: xoxs-abc-123-xyzxyzxyz");
       expect(result).toBe("token: [REDACTED:detected]");
     });
   });
