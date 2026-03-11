@@ -98,5 +98,47 @@ describe("validateProjectDir", () => {
       const result = validateProjectDir(dir);
       expect(result.valid).toBe(true);
     });
+
+    it("accepts directory with Gemfile", () => {
+      const dir = makeTempDir();
+      writeFileSync(join(dir, "Gemfile"), "");
+      const result = validateProjectDir(dir);
+      expect(result.valid).toBe(true);
+    });
+
+    it("accepts directory with pom.xml", () => {
+      const dir = makeTempDir();
+      writeFileSync(join(dir, "pom.xml"), "");
+      const result = validateProjectDir(dir);
+      expect(result.valid).toBe(true);
+    });
+
+    it("accepts directory with build.gradle", () => {
+      const dir = makeTempDir();
+      writeFileSync(join(dir, "build.gradle"), "");
+      const result = validateProjectDir(dir);
+      expect(result.valid).toBe(true);
+    });
+
+    it("accepts directory with CMakeLists.txt", () => {
+      const dir = makeTempDir();
+      writeFileSync(join(dir, "CMakeLists.txt"), "");
+      const result = validateProjectDir(dir);
+      expect(result.valid).toBe(true);
+    });
+
+    it("accepts directory with composer.json", () => {
+      const dir = makeTempDir();
+      writeFileSync(join(dir, "composer.json"), "{}");
+      const result = validateProjectDir(dir);
+      expect(result.valid).toBe(true);
+    });
+
+    it("accepts directory with setup.py", () => {
+      const dir = makeTempDir();
+      writeFileSync(join(dir, "setup.py"), "");
+      const result = validateProjectDir(dir);
+      expect(result.valid).toBe(true);
+    });
   });
 });
