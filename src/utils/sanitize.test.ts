@@ -79,8 +79,9 @@ describe("sanitize", () => {
         SMALL: "mysecret",
         LARGE: "mysecretvalue",
       });
-      expect(result).toContain("[REDACTED:LARGE]");
-      expect(result).toContain("[REDACTED:SMALL]");
+      expect(result).toBe(
+        "abc: [REDACTED:SMALL] and [REDACTED:LARGE] here"
+      );
     });
   });
 
