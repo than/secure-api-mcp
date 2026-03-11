@@ -45,6 +45,10 @@ describe("validateUrl - private IPv4", () => {
   it("blocks 0.0.0.1 (current network)", async () => {
     expect((await validateUrl("http://0.0.0.1")).allowed).toBe(false);
   });
+
+  it("blocks 0.0.0.0 (current network)", async () => {
+    expect((await validateUrl("http://0.0.0.0")).allowed).toBe(false);
+  });
 });
 
 describe("validateUrl - IPv6 loopback and private ranges", () => {
