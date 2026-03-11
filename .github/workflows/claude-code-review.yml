@@ -6,7 +6,7 @@ on:
 
 jobs:
   claude-review:
-    if: github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -65,4 +65,3 @@ jobs:
             Use `gh pr comment` with your Bash tool to leave your review as a comment on the PR.
 
           claude_args: '--model opus --allowed-tools "Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue list:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*),Bash(npm run build:*),Bash(npm test:*)"'
-          allowed_bots: dependabot[bot]
