@@ -4,10 +4,11 @@ import { GetEnvKeysSchema, getEnvKeys } from "./tools/get-env-keys.js";
 import { RunWithEnvSchema, runWithEnv } from "./tools/run-with-env.js";
 import { ApiCallSchema, apiCall } from "./tools/api-call.js";
 import { SyncExampleSchema, syncExample } from "./tools/sync-example.js";
+import { ReadMyCnfSchema, readMyCnf } from "./tools/read-mycnf.js";
 
 const server = new McpServer({
   name: "secure-api",
-  version: "1.0.0",
+  version: "1.1.0",
 });
 
 server.tool(
@@ -22,7 +23,7 @@ server.tool(
 
 server.tool(
   "run_with_env",
-  "Runs a shell command with .env variables injected into the process environment. Output is sanitized — secret values are replaced with opaque [REDACTED:N] placeholders.",
+  "Runs a shell command with .env variables injected into the process environment. Output is sanitized — secret values are replaced with [REDACTED:KEY_NAME] placeholders. Set include_mycnf to also sanitize MySQL credentials from .my.cnf in command output.",
   RunWithEnvSchema.shape,
   async (args) => {
     const result = await runWithEnv(args);
@@ -46,6 +47,16 @@ server.tool(
   SyncExampleSchema.shape,
   async (args) => {
     const result = await syncExample(args);
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.tool(
+  "read_mycnf",
+  "Reads MySQL .my.cnf configuration. Returns section names and safe fields (port, database, socket) with credentials (user, password, host) redacted. Checks ~/.my.cnf and project-local .my.cnf.",
+  ReadMyCnfSchema.shape,
+  async (args) => {
+    const result = await readMyCnf(args);
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
