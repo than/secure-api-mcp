@@ -8,7 +8,7 @@ import { ReadMyCnfSchema, readMyCnf } from "./tools/read-mycnf.js";
 
 const server = new McpServer({
   name: "secure-api",
-  version: "1.0.0",
+  version: "1.1.0",
 });
 
 server.tool(
