@@ -2,6 +2,8 @@ import { z } from "zod";
 import { isAbsolute } from "node:path";
 import { execFile } from "node:child_process";
 import { loadEnv } from "../env-loader.js";
+import { loadMyCnf } from "../mycnf-loader.js";
+import { homedir } from "node:os";
 import { sanitize } from "../utils/sanitize.js";
 import { validateProjectDir } from "../security/path-validator.js";
 import { auditLog } from "../security/audit.js";
@@ -21,6 +23,11 @@ export const RunWithEnvSchema = z.object({
     .optional()
     .default(30000)
     .describe("Command timeout in milliseconds"),
+  include_mycnf: z
+    .boolean()
+    .optional()
+    .default(false)
+    .describe("Include .my.cnf secrets in output sanitization"),
 });
 
 // Binaries that can exfiltrate data over the network
@@ -79,6 +86,13 @@ export async function runWithEnv(
 
   const env = loadEnv(args.project_dir);
 
+  // Build combined secret map for sanitization
+  let sanitizeSecrets: Record<string, string> = env;
+  if (args.include_mycnf) {
+    const mycnf = loadMyCnf(args.project_dir, homedir());
+    sanitizeSecrets = { ...env, ...mycnf.secrets };
+  }
+
   // Filter to requested keys if specified
   const injectedEnv: Record<string, string> = {};
   const keys = args.env_keys ?? Object.keys(env);
@@ -121,8 +135,8 @@ export async function runWithEnv(
         });
         resolve({
           exit_code: exitCode,
-          stdout: sanitize(stdout, env),
-          stderr: sanitize(stderr, env),
+          stdout: sanitize(stdout, sanitizeSecrets),
+          stderr: sanitize(stderr, sanitizeSecrets),
           ...(warnings.length > 0 ? { warnings } : {}),
         });
       }
