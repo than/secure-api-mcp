@@ -34,6 +34,7 @@ describe("runWithEnv with include_mycnf", () => {
     const result = await runWithEnv({
       project_dir: "/tmp",
       command: "echo supersecretpass",
+      timeout_ms: 30000,
       include_mycnf: true,
     });
 
@@ -53,6 +54,7 @@ describe("runWithEnv with include_mycnf", () => {
     const result = await runWithEnv({
       project_dir: "/tmp",
       command: "echo mysqlpass123",
+      timeout_ms: 30000,
       include_mycnf: false,
     });
 
@@ -67,6 +69,8 @@ describe("runWithEnv with include_mycnf", () => {
     const result = await runWithEnv({
       project_dir: "/tmp",
       command: "echo hello",
+      timeout_ms: 30000,
+      include_mycnf: false,
     });
 
     expect(loadMyCnf).not.toHaveBeenCalled();
@@ -84,6 +88,7 @@ describe("runWithEnv with include_mycnf", () => {
     const result = await runWithEnv({
       project_dir: "/tmp",
       command: "echo envtoken999 cnfpass888",
+      timeout_ms: 30000,
       include_mycnf: true,
     });
 
