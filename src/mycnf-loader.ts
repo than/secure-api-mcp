@@ -1,6 +1,6 @@
 import { readFileSync, statSync, readdirSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { parse } from "ini";
 
 /** Fields whose values are considered secrets and fed to the sanitizer. */
@@ -81,12 +81,14 @@ function parseFile(
   for (const line of lines) {
     const trimmed = line.trim();
     if (trimmed.startsWith("!include ")) {
-      const target = trimmed.slice("!include ".length).trim();
+      const baseDir = dirname(resolved);
+      const target = resolve(baseDir, trimmed.slice("!include ".length).trim());
       const sub = parseFile(target, visited);
       mergeSections(sections, sub.sections);
       for (const [k, v] of sub.files) files.set(k, v);
     } else if (trimmed.startsWith("!includedir ")) {
-      const dir = trimmed.slice("!includedir ".length).trim();
+      const baseDir = dirname(resolved);
+      const dir = resolve(baseDir, trimmed.slice("!includedir ".length).trim());
       let entries: string[];
       try {
         entries = readdirSync(dir).filter((f) => f.endsWith(".cnf")).sort();

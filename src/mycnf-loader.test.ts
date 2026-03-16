@@ -155,6 +155,17 @@ describe("loadMyCnf - !include directive", () => {
     expect(result.sections.client?.password).toBe("from_include");
   });
 
+  it("resolves relative !include paths against parent file directory", async () => {
+    const { loadMyCnf } = await import("./mycnf-loader.js");
+    const dir = tempDir();
+    const home = tempDir();
+    // extra.cnf sits next to .my.cnf — use relative path in !include
+    writeFileSync(join(home, "extra.cnf"), "[client]\npassword=relative_secret\n");
+    writeFileSync(join(home, ".my.cnf"), "[client]\nuser=root\n!include extra.cnf\n");
+    const result = loadMyCnf(dir, home);
+    expect(result.sections.client?.password).toBe("relative_secret");
+  });
+
   it("detects include cycles and does not loop", async () => {
     const { loadMyCnf } = await import("./mycnf-loader.js");
     const dir = tempDir();
