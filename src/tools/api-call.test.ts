@@ -26,6 +26,7 @@ beforeEach(() => {
   mockValidateProjectDir.mockReturnValue({ valid: true });
   mockValidateUrl.mockResolvedValue({
     allowed: true,
+    resolvedIp: "93.184.216.34",
   });
   mockLoadEnv.mockReturnValue({
     MY_TOKEN: "tok-secret",
@@ -122,7 +123,16 @@ describe("apiCall - fetch error handling", () => {
     );
   });
 
-  it("uses the original URL directly (no IP rewriting)", async () => {
+  it("sanitizes secret values in error messages", async () => {
+    mockFetch.mockRejectedValue(new Error("connect to tok-secret failed"));
+    const result = await apiCall({
+      project_dir: "/fake/project",
+      url: "https://example.com",
+    });
+    expect(result.body).toBe("Fetch failed: connect to [REDACTED:MY_TOKEN] failed");
+  });
+
+  it("uses the original URL with a pinned-IP dispatcher", async () => {
     await apiCall({
       project_dir: "/fake/project",
       url: "https://example.com/api/data",
@@ -130,7 +140,7 @@ describe("apiCall - fetch error handling", () => {
     });
     expect(mockFetch).toHaveBeenCalledWith(
       "https://example.com/api/data",
-      expect.objectContaining({ method: "GET" })
+      expect.objectContaining({ method: "GET", dispatcher: expect.anything() })
     );
   });
 });
