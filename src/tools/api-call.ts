@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { isAbsolute } from "node:path";
+import { Agent } from "undici";
 import { loadEnv } from "../env-loader.js";
 import { sanitize } from "../utils/sanitize.js";
 import { validateUrl } from "../security/url-validator.js";
@@ -71,24 +72,34 @@ export async function apiCall(
     headers["Authorization"] = `Bearer ${env[args.auth_env_key]}`;
   }
 
-  // Use the resolved IP to prevent DNS rebinding attacks:
-  // An attacker's DNS could return a safe IP during validation above,
-  // then a private IP (127.0.0.1, 169.254.169.254) during fetch.
-  // By rewriting the URL with the resolved IP and setting Host header,
-  // we ensure fetch uses the same IP we validated.
-  let fetchUrl = args.url;
-  if (urlCheck.resolvedIp && urlCheck.hostname) {
-    const parsed = new URL(args.url);
-    parsed.hostname = urlCheck.resolvedIp;
-    fetchUrl = parsed.toString();
-    headers["Host"] = urlCheck.hostname;
-  }
-
-  const response = await fetch(fetchUrl, {
+  // Pin the resolved IP at the socket layer to close the DNS rebinding
+  // TOCTOU window. The URL keeps the original hostname (preserving TLS
+  // SNI and cert validation), but undici's lookup callback returns the
+  // IP that validateUrl already checked instead of re-resolving DNS.
+  const fetchOptions: Record<string, unknown> = {
     method: args.method,
     headers,
     body: args.body,
-  });
+  };
+  if (urlCheck.resolvedIp) {
+    const pinnedIp = urlCheck.resolvedIp;
+    fetchOptions.dispatcher = new Agent({
+      connect: {
+        lookup: (_hostname, _options, cb) => {
+          cb(null, [{ address: pinnedIp, family: pinnedIp.includes(":") ? 6 : 4 }]);
+        },
+      },
+    });
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(args.url, fetchOptions);
+  } catch (err) {
+    auditLog("api_call", { status: "error" });
+    const message = err instanceof Error ? err.message : String(err);
+    return { status: 0, headers: {}, body: sanitize(`Fetch failed: ${message}`, env) };
+  }
 
   const bodyText = await response.text();
   const responseHeaders: Record<string, string> = {};

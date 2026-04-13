@@ -104,8 +104,6 @@ export interface ValidatedUrl {
   reason?: string;
   /** The resolved IP address, available when allowed is true */
   resolvedIp?: string;
-  /** The original hostname, available when allowed is true */
-  hostname?: string;
 }
 
 export async function validateUrl(url: string): Promise<ValidatedUrl> {
@@ -151,7 +149,7 @@ export async function validateUrl(url: string): Promise<ValidatedUrl> {
         reason: `Blocked: ${hostname} resolves to private IP ${address}`,
       };
     }
-    return { allowed: true, resolvedIp: address, hostname: bareHostname };
+    return { allowed: true, resolvedIp: address };
   } catch {
     return {
       allowed: false,
