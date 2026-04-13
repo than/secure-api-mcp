@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.1] - 2026-04-13
+
+### Fixed
+
+- Excluded test files from published package (71 files / 35 kB down to 41 files / 21 kB)
+
 ## [1.1.0] - 2026-04-13
 
 ### Added
