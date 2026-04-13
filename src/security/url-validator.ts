@@ -102,10 +102,6 @@ function stripBrackets(hostname: string): string {
 export interface ValidatedUrl {
   allowed: boolean;
   reason?: string;
-  /** The resolved IP address, available when allowed is true */
-  resolvedIp?: string;
-  /** The original hostname, available when allowed is true */
-  hostname?: string;
 }
 
 export async function validateUrl(url: string): Promise<ValidatedUrl> {
@@ -151,7 +147,7 @@ export async function validateUrl(url: string): Promise<ValidatedUrl> {
         reason: `Blocked: ${hostname} resolves to private IP ${address}`,
       };
     }
-    return { allowed: true, resolvedIp: address, hostname: bareHostname };
+    return { allowed: true };
   } catch {
     return {
       allowed: false,

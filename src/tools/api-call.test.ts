@@ -26,8 +26,6 @@ beforeEach(() => {
   mockValidateProjectDir.mockReturnValue({ valid: true });
   mockValidateUrl.mockResolvedValue({
     allowed: true,
-    resolvedIp: "93.184.216.34",
-    hostname: "example.com",
   });
   mockLoadEnv.mockReturnValue({
     MY_TOKEN: "tok-secret",
@@ -102,6 +100,37 @@ describe("apiCall - audit keysAccessedCount", () => {
     expect(mockAuditLog).toHaveBeenCalledWith(
       "api_call",
       expect.objectContaining({ keysAccessedCount: 0 })
+    );
+  });
+});
+
+describe("apiCall - fetch error handling", () => {
+  it("returns a structured error when fetch throws", async () => {
+    mockFetch.mockRejectedValue(new TypeError("fetch failed"));
+    const result = await apiCall({
+      project_dir: "/fake/project",
+      url: "https://example.com",
+    });
+    expect(result).toEqual({
+      status: 0,
+      headers: {},
+      body: "Fetch failed: fetch failed",
+    });
+    expect(mockAuditLog).toHaveBeenCalledWith(
+      "api_call",
+      expect.objectContaining({ status: "error" })
+    );
+  });
+
+  it("uses the original URL directly (no IP rewriting)", async () => {
+    await apiCall({
+      project_dir: "/fake/project",
+      url: "https://example.com/api/data",
+      method: "GET",
+    });
+    expect(mockFetch).toHaveBeenCalledWith(
+      "https://example.com/api/data",
+      expect.objectContaining({ method: "GET" })
     );
   });
 });

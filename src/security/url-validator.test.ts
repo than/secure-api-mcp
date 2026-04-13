@@ -167,8 +167,6 @@ describe("validateUrl - DNS resolution", () => {
   it("allows hostname resolving to public IP", async () => {
     const result = await validateUrl("https://example.com");
     expect(result.allowed).toBe(true);
-    expect(result.resolvedIp).toBe("93.184.216.34");
-    expect(result.hostname).toBe("example.com");
   });
 
   it("blocks hostname resolving to private IP (DNS rebinding)", async () => {

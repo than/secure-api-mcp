@@ -33,7 +33,9 @@ server.tool(
 
 server.tool(
   "api_call",
-  "Makes an HTTP request with secrets from .env injected into headers. Use auth_env_key for Bearer tokens, or {{KEY_NAME}} syntax in headers for other auth patterns. Response is sanitized.",
+  `Makes an HTTP request with secrets from .env injected into headers. Use auth_env_key for Bearer tokens, or {{KEY_NAME}} syntax in headers for other auth patterns. Response body and headers are sanitized so secrets never appear in output.
+
+Prefer api_call over run_with_env+curl for simple REST calls — it's safer (no shell injection surface), returns structured {status, headers, body}, and handles secret redaction automatically. Use run_with_env when you need curl-specific features like --resolve, client certs, streaming, or non-HTTP commands.`,
   ApiCallSchema.shape,
   async (args) => {
     const result = await apiCall(args);
