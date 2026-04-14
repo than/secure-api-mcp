@@ -30,7 +30,9 @@ export const RunWithEnvSchema = z.object({
     .describe("Include .my.cnf secrets in output sanitization"),
 });
 
-// Binaries that can exfiltrate data over the network
+// Best-effort exfiltration detection: matches direct invocations only.
+// Bypassed by indirect execution (python -c, node -e, ./script.sh, env curl, etc.).
+// This is a warning system, not a security boundary — output sanitization is the real guard.
 const NETWORK_BINARIES = [
   "curl", "wget", "nc", "ncat", "netcat", "ssh", "scp", "sftp",
   "dig", "nslookup", "host", "telnet", "ftp",

@@ -23,7 +23,7 @@ server.tool(
 
 server.tool(
   "run_with_env",
-  "Runs a shell command with .env variables injected into the process environment. Output is sanitized — secret values are replaced with [REDACTED:KEY_NAME] placeholders. Set include_mycnf to also sanitize MySQL credentials from .my.cnf in command output.",
+  "Runs a shell command with .env variables injected into the process environment. Output is sanitized — secret values are replaced with [REDACTED:KEY_NAME] placeholders. Set include_mycnf to also sanitize MySQL credentials from .my.cnf in command output. Note: network binary detection (curl, wget, etc.) is best-effort and only catches direct invocations — indirect execution via interpreters or scripts is not detected. Output sanitization is the primary security layer.",
   RunWithEnvSchema.shape,
   async (args) => {
     const result = await runWithEnv(args);
