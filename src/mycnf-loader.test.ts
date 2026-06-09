@@ -203,6 +203,52 @@ describe("loadMyCnf - !includedir directive", () => {
   });
 });
 
+describe("loadMyCnf - include containment", () => {
+  it("ignores a project-local !include that points outside the project", async () => {
+    const { loadMyCnf } = await import("./mycnf-loader.js");
+    const dir = tempDir();
+    const home = tempDir();
+    const outside = tempDir();
+    // A file outside the project that a crafted include would try to disclose.
+    writeFileSync(join(outside, "secrets.cnf"), "[client]\nport=9999\n");
+    writeFileSync(
+      join(dir, ".my.cnf"),
+      `[client]\nuser=root\n!include ${join(outside, "secrets.cnf")}\n`
+    );
+    const result = loadMyCnf(dir, home);
+    // The local section is read, but the out-of-bounds include is skipped.
+    expect(result.sections.client?.user).toBe("root");
+    expect(result.sections.client?.port).toBeUndefined();
+  });
+
+  it("still follows project-local includes that stay within the project", async () => {
+    const { loadMyCnf } = await import("./mycnf-loader.js");
+    const dir = tempDir();
+    const home = tempDir();
+    writeFileSync(join(dir, "extra.cnf"), "[client]\npassword=inproject\n");
+    writeFileSync(
+      join(dir, ".my.cnf"),
+      "[client]\nuser=root\n!include extra.cnf\n"
+    );
+    const result = loadMyCnf(dir, home);
+    expect(result.sections.client?.password).toBe("inproject");
+  });
+
+  it("allows the global ~/.my.cnf chain to include files outside the home dir", async () => {
+    const { loadMyCnf } = await import("./mycnf-loader.js");
+    const dir = tempDir();
+    const home = tempDir();
+    const elsewhere = tempDir();
+    writeFileSync(join(elsewhere, "system.cnf"), "[client]\npassword=systemwide\n");
+    writeFileSync(
+      join(home, ".my.cnf"),
+      `[client]\nuser=root\n!include ${join(elsewhere, "system.cnf")}\n`
+    );
+    const result = loadMyCnf(dir, home);
+    expect(result.sections.client?.password).toBe("systemwide");
+  });
+});
+
 describe("loadMyCnf - caching", () => {
   it("returns same reference on cache hit", async () => {
     const { loadMyCnf } = await import("./mycnf-loader.js");

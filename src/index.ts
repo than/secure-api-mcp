@@ -23,7 +23,7 @@ server.tool(
 
 server.tool(
   "run_with_env",
-  "Runs a shell command with .env variables injected into the process environment. Output is sanitized — secret values are replaced with [REDACTED:KEY_NAME] placeholders. Set include_mycnf to also sanitize MySQL credentials from .my.cnf in command output. Note: network binary detection (curl, wget, etc.) is best-effort and only catches direct invocations — indirect execution via interpreters or scripts is not detected. Output sanitization is the primary security layer.",
+  "Runs a shell command with .env variables injected into the process environment. Output is sanitized — secret values are replaced with [REDACTED:KEY_NAME] placeholders. Set include_mycnf to also sanitize MySQL credentials from .my.cnf in command output. Note: network binary detection (curl, wget, etc.) is best-effort and only catches direct invocations — indirect execution via interpreters or scripts is not detected. Output sanitization here is best-effort, not a hard boundary — a command can re-encode, reverse, or split a secret into a form the sanitizer won't catch before printing it. For sending secrets to an HTTP endpoint, prefer api_call, which has no shell surface and an optional destination allowlist.",
   RunWithEnvSchema.shape,
   async (args) => {
     const result = await runWithEnv(args);
@@ -35,7 +35,7 @@ server.tool(
   "api_call",
   `Makes an HTTP request with secrets from .env injected into headers. Use auth_env_key for Bearer tokens, or {{KEY_NAME}} syntax in headers for other auth patterns. Response body and headers are sanitized so secrets never appear in output.
 
-Prefer api_call over run_with_env+curl for simple REST calls — it's safer (no shell injection surface), returns structured {status, headers, body}, and handles secret redaction automatically. Use run_with_env when you need curl-specific features like --resolve, client certs, streaming, or non-HTTP commands.`,
+Prefer api_call over run_with_env+curl for simple REST calls — it's safer (no shell injection surface), returns structured {status, headers, body}, and handles secret redaction automatically. When a secret is injected, the destination host is checked against the SECURE_API_ALLOWED_HOSTS allowlist (if set, non-matching hosts are blocked; if unset, the call proceeds with a warning). Requests time out after timeout_ms (default 30s). Use run_with_env when you need curl-specific features like --resolve, client certs, streaming, or non-HTTP commands.`,
   ApiCallSchema.shape,
   async (args) => {
     const result = await apiCall(args);

@@ -1,6 +1,6 @@
 import { readFileSync, statSync, readdirSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { parse } from "ini";
 
 /** Fields whose values are considered secrets and fed to the sanitizer. */
@@ -44,13 +44,29 @@ function readFile(path: string): { content: string; mtime: number } | null {
   return { content, mtime };
 }
 
+/** True if `target` resolves to `root` or a path nested under it. */
+function isWithin(root: string, target: string): boolean {
+  const r = resolve(root);
+  const t = resolve(target);
+  return t === r || t.startsWith(r + sep);
+}
+
 /**
  * Parse a single .my.cnf file, following !include / !includedir directives.
  * `visited` tracks resolved paths for cycle detection.
+ *
+ * `containTo`, when set, restricts !include / !includedir targets to paths
+ * within that directory. This is applied to the project-local chain, whose
+ * .my.cnf may be attacker-supplied (e.g. committed to a repo), to stop a
+ * crafted include from pulling in arbitrary files elsewhere on disk —
+ * read_mycnf returns non-secret fields verbatim, so an unbounded include
+ * would be a file-disclosure primitive. The trusted global (~/.my.cnf) chain
+ * is parsed with no containment so legitimate /etc includes still work.
  */
 function parseFile(
   filePath: string,
-  visited: Set<string>
+  visited: Set<string>,
+  containTo?: string
 ): {
   sections: Record<string, Record<string, string>>;
   files: Map<string, { mtime: number; contentHash: string }>;
@@ -83,12 +99,14 @@ function parseFile(
     if (trimmed.startsWith("!include ")) {
       const baseDir = dirname(resolved);
       const target = resolve(baseDir, trimmed.slice("!include ".length).trim());
-      const sub = parseFile(target, visited);
+      if (containTo && !isWithin(containTo, target)) continue; // out-of-bounds include
+      const sub = parseFile(target, visited, containTo);
       mergeSections(sections, sub.sections);
       for (const [k, v] of sub.files) files.set(k, v);
     } else if (trimmed.startsWith("!includedir ")) {
       const baseDir = dirname(resolved);
       const dir = resolve(baseDir, trimmed.slice("!includedir ".length).trim());
+      if (containTo && !isWithin(containTo, dir)) continue; // out-of-bounds include
       let entries: string[];
       try {
         entries = readdirSync(dir).filter((f) => f.endsWith(".cnf")).sort();
@@ -96,7 +114,7 @@ function parseFile(
         entries = [];
       }
       for (const entry of entries) {
-        const sub = parseFile(join(dir, entry), visited);
+        const sub = parseFile(join(dir, entry), visited, containTo);
         mergeSections(sections, sub.sections);
         for (const [k, v] of sub.files) files.set(k, v);
       }
@@ -161,8 +179,14 @@ export function loadMyCnf(projectDir: string, homeDir: string): MyCnfResult {
   const globalVisited = new Set<string>();
   const globalResult = parseFile(join(homeDir, ".my.cnf"), globalVisited);
 
+  // Contain the project-local chain to the project directory: its .my.cnf may
+  // be untrusted, so its includes must not reach outside the project.
   const localVisited = new Set<string>();
-  const localResult = parseFile(join(projectDir, ".my.cnf"), localVisited);
+  const localResult = parseFile(
+    join(projectDir, ".my.cnf"),
+    localVisited,
+    resolve(projectDir)
+  );
 
   // Collect all file metadata for cache comparison
   const allFiles = new Map<string, { mtime: number; contentHash: string }>();
