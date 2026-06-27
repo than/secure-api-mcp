@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.2] - 2026-06-27
+
+### Changed
+
+- Bumped all dependencies to latest: zod 3→4, TypeScript 5→6, vitest 3→4, dotenv 16→17, ini 6→7, `@modelcontextprotocol/sdk` 1.27→1.29, undici 8.1→8.5, `@types/node` 22→26
+- Migrated to zod 4 APIs in `api_call` schema (`z.record(z.string(), z.string())`, `z.url()`); no public behavior change
+
 ## [1.1.1] - 2026-04-13
 
 ### Fixed
