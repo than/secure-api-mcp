@@ -5,6 +5,7 @@ import {
   mkdirSync,
   rmSync,
   utimesSync,
+  symlinkSync,
 } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -232,6 +233,42 @@ describe("loadMyCnf - include containment", () => {
     );
     const result = loadMyCnf(dir, home);
     expect(result.sections.client?.password).toBe("inproject");
+  });
+
+  it("ignores a project-local !include whose in-project target symlinks outside", async () => {
+    const { loadMyCnf } = await import("./mycnf-loader.js");
+    const dir = tempDir();
+    const home = tempDir();
+    const outside = tempDir();
+    writeFileSync(join(outside, "secrets.cnf"), "[client]\nport=9999\n");
+    // innocent.cnf lives inside the project but is a symlink to the outside file.
+    symlinkSync(join(outside, "secrets.cnf"), join(dir, "innocent.cnf"));
+    writeFileSync(
+      join(dir, ".my.cnf"),
+      "[client]\nuser=root\n!include ./innocent.cnf\n"
+    );
+    const result = loadMyCnf(dir, home);
+    expect(result.sections.client?.user).toBe("root");
+    expect(result.sections.client?.port).toBeUndefined();
+  });
+
+  it("ignores an !includedir entry that symlinks outside the project", async () => {
+    const { loadMyCnf } = await import("./mycnf-loader.js");
+    const dir = tempDir();
+    const home = tempDir();
+    const outside = tempDir();
+    writeFileSync(join(outside, "secrets.cnf"), "[client]\nport=8888\n");
+    const confd = join(dir, "conf.d");
+    mkdirSync(confd);
+    // An in-project includedir entry that is a symlink to the outside file.
+    symlinkSync(join(outside, "secrets.cnf"), join(confd, "evil.cnf"));
+    writeFileSync(
+      join(dir, ".my.cnf"),
+      "[client]\nuser=root\n!includedir ./conf.d\n"
+    );
+    const result = loadMyCnf(dir, home);
+    expect(result.sections.client?.user).toBe("root");
+    expect(result.sections.client?.port).toBeUndefined();
   });
 
   it("allows the global ~/.my.cnf chain to include files outside the home dir", async () => {

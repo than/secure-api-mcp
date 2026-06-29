@@ -145,15 +145,25 @@ describe("apiCall - fetch error handling", () => {
   });
 
   it("reports a timeout when fetch aborts", async () => {
-    const abortErr = new Error("aborted");
-    abortErr.name = "AbortError";
-    mockFetch.mockRejectedValue(abortErr);
+    // Reject with the *real* abort reason the runtime sets when apiCall's
+    // internal AbortController fires (a DOMException), not a hand-built Error.
+    // This verifies the friendly-message branch (instanceof Error && name ===
+    // "AbortError") actually holds for a genuine abort on the Node target — a
+    // synthetic Error would mask a regression if that ever stopped being true.
+    mockFetch.mockImplementation(
+      (_url: string, opts: { signal: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          opts.signal.addEventListener("abort", () =>
+            reject(opts.signal.reason)
+          );
+        })
+    );
     const result = await apiCall({
       project_dir: "/fake/project",
       url: "https://example.com",
-      timeout_ms: 5000,
+      timeout_ms: 1,
     });
-    expect(result.body).toBe("Fetch failed: Request timed out after 5000ms");
+    expect(result.body).toBe("Fetch failed: Request timed out after 1ms");
   });
 
   it("passes an abort signal to fetch", async () => {

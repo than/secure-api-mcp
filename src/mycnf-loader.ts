@@ -1,4 +1,4 @@
-import { readFileSync, statSync, readdirSync } from "node:fs";
+import { readFileSync, statSync, readdirSync, realpathSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, join, resolve, sep } from "node:path";
 import { parse } from "ini";
@@ -52,6 +52,19 @@ function isWithin(root: string, target: string): boolean {
 }
 
 /**
+ * Canonical (symlink-resolved) path, or null if it can't be resolved (ENOENT).
+ * Used for containment checks: a lexical `resolve()` does not follow symlinks,
+ * so an in-project symlink could otherwise point at an out-of-bounds file.
+ */
+function tryRealpath(path: string): string | null {
+  try {
+    return realpathSync(path);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Parse a single .my.cnf file, following !include / !includedir directives.
  * `visited` tracks resolved paths for cycle detection.
  *
@@ -80,6 +93,18 @@ function parseFile(
   }
   visited.add(resolved);
 
+  // Containment for the untrusted project-local chain: the *real* (symlink-
+  // resolved) path of every file we actually read must stay within `containTo`.
+  // Enforcing here — at the read point — covers !include targets, !includedir
+  // entries, and a symlinked .my.cnf alike. A purely lexical check on the
+  // directive target would let an in-project symlink escape the project.
+  if (containTo) {
+    const real = tryRealpath(resolved);
+    if (!real || !isWithin(containTo, real)) {
+      return { sections, files };
+    }
+  }
+
   const fileData = readFile(resolved);
   if (!fileData) {
     return { sections, files };
@@ -99,14 +124,20 @@ function parseFile(
     if (trimmed.startsWith("!include ")) {
       const baseDir = dirname(resolved);
       const target = resolve(baseDir, trimmed.slice("!include ".length).trim());
-      if (containTo && !isWithin(containTo, target)) continue; // out-of-bounds include
+      // Containment is enforced authoritatively at parseFile's read point
+      // (canonical-path check), which also catches symlinked targets.
       const sub = parseFile(target, visited, containTo);
       mergeSections(sections, sub.sections);
       for (const [k, v] of sub.files) files.set(k, v);
     } else if (trimmed.startsWith("!includedir ")) {
       const baseDir = dirname(resolved);
       const dir = resolve(baseDir, trimmed.slice("!includedir ".length).trim());
-      if (containTo && !isWithin(containTo, dir)) continue; // out-of-bounds include
+      // Skip listing a directory whose real path is out of bounds; each entry
+      // is still re-checked by canonical path when parseFile reads it.
+      if (containTo) {
+        const realDir = tryRealpath(dir);
+        if (!realDir || !isWithin(containTo, realDir)) continue;
+      }
       let entries: string[];
       try {
         entries = readdirSync(dir).filter((f) => f.endsWith(".cnf")).sort();
@@ -180,12 +211,14 @@ export function loadMyCnf(projectDir: string, homeDir: string): MyCnfResult {
   const globalResult = parseFile(join(homeDir, ".my.cnf"), globalVisited);
 
   // Contain the project-local chain to the project directory: its .my.cnf may
-  // be untrusted, so its includes must not reach outside the project.
+  // be untrusted, so its includes must not reach outside the project. Contain
+  // against the canonical project path so a symlinked project root (e.g. macOS
+  // /tmp -> /private/tmp) doesn't reject legitimate in-project includes.
   const localVisited = new Set<string>();
   const localResult = parseFile(
     join(projectDir, ".my.cnf"),
     localVisited,
-    resolve(projectDir)
+    tryRealpath(projectDir) ?? resolve(projectDir)
   );
 
   // Collect all file metadata for cache comparison
