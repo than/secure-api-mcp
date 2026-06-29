@@ -270,4 +270,66 @@ describe("loadMyCnf - caching", () => {
     const second = loadMyCnf(dir, home);
     expect(second.secrets["client.password"]).toBe("dropped_in");
   });
+
+  it("detects a new .cnf in an !includedir even when the dir mtime is frozen", async () => {
+    const { loadMyCnf } = await import("./mycnf-loader.js");
+    const dir = tempDir();
+    const home = tempDir();
+    const includeDir = join(home, "conf.d");
+    mkdirSync(includeDir);
+    const dirTime = new Date("2020-06-15T12:00:00.000Z");
+    writeFileSync(join(includeDir, "a.cnf"), "[client]\nuser=root\n");
+    writeFileSync(join(home, ".my.cnf"), `!includedir ${includeDir}\n`);
+    utimesSync(includeDir, dirTime, dirTime);
+    const first = loadMyCnf(dir, home);
+    expect(first.secrets["client.password"]).toBeUndefined();
+
+    // Add a file but restore the directory mtime (NFS / touch -m on the dir).
+    writeFileSync(join(includeDir, "z-secret.cnf"), "[client]\npassword=frozen_dir\n");
+    utimesSync(includeDir, dirTime, dirTime);
+    const second = loadMyCnf(dir, home);
+    expect(second.secrets["client.password"]).toBe("frozen_dir");
+  });
+
+  it("detects a project-local .my.cnf created after only the global was cached", async () => {
+    const { loadMyCnf } = await import("./mycnf-loader.js");
+    const dir = tempDir();
+    const home = tempDir();
+    writeFileSync(join(home, ".my.cnf"), "[client]\nuser=root\n");
+    const first = loadMyCnf(dir, home);
+    expect(first.secrets["client.password"]).toBeUndefined();
+
+    // Project-local file appears mid-session.
+    writeFileSync(join(dir, ".my.cnf"), "[client]\npassword=local_secret\n");
+    const second = loadMyCnf(dir, home);
+    expect(second.secrets["client.password"]).toBe("local_secret");
+  });
+
+  it("detects a global ~/.my.cnf created after only the project-local was cached", async () => {
+    const { loadMyCnf } = await import("./mycnf-loader.js");
+    const dir = tempDir();
+    const home = tempDir();
+    writeFileSync(join(dir, ".my.cnf"), "[client]\nuser=proj\n");
+    const first = loadMyCnf(dir, home);
+    expect(first.secrets["client.password"]).toBeUndefined();
+
+    // Global file appears mid-session.
+    writeFileSync(join(home, ".my.cnf"), "[client]\npassword=home_secret\n");
+    const second = loadMyCnf(dir, home);
+    expect(second.secrets["client.password"]).toBe("home_secret");
+  });
+
+  it("detects an !include target created after the parent was cached", async () => {
+    const { loadMyCnf } = await import("./mycnf-loader.js");
+    const dir = tempDir();
+    const home = tempDir();
+    // Parent references extra.cnf, which does not exist yet.
+    writeFileSync(join(home, ".my.cnf"), "[client]\nuser=root\n!include extra.cnf\n");
+    const first = loadMyCnf(dir, home);
+    expect(first.secrets["client.password"]).toBeUndefined();
+
+    writeFileSync(join(home, "extra.cnf"), "[client]\npassword=included_secret\n");
+    const second = loadMyCnf(dir, home);
+    expect(second.secrets["client.password"]).toBe("included_secret");
+  });
 });
