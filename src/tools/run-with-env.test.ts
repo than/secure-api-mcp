@@ -63,7 +63,7 @@ describe("runWithEnv with include_mycnf", () => {
     expect(r.stdout).toContain("mysqlpass123");
   });
 
-  it("does NOT load mycnf secrets when include_mycnf is omitted", async () => {
+  it("does NOT load mycnf secrets when include_mycnf defaults to false", async () => {
     mockLoadEnv.mockReturnValue({});
 
     const result = await runWithEnv({
