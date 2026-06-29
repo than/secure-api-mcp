@@ -231,4 +231,43 @@ describe("loadMyCnf - caching", () => {
     const second = loadMyCnf(dir, home);
     expect(second.secrets["client.password"]).toBe("rotated");
   });
+
+  it("detects rotation in an !included file even when its mtime is frozen", async () => {
+    const { loadMyCnf } = await import("./mycnf-loader.js");
+    const dir = tempDir();
+    const home = tempDir();
+    const rootPath = join(home, ".my.cnf");
+    const includedPath = join(home, "extra.cnf");
+    const fixedTime = new Date("2020-06-15T12:00:00.000Z");
+
+    // Root file !includes a secrets file. Freeze the included file's mtime so a
+    // later rotation keeps the same mtime (NFS / backup-restore / touch -m).
+    writeFileSync(rootPath, "[client]\nuser=root\n!include extra.cnf\n");
+    writeFileSync(includedPath, "[client]\npassword=original\n");
+    utimesSync(includedPath, fixedTime, fixedTime);
+    const first = loadMyCnf(dir, home);
+    expect(first.secrets["client.password"]).toBe("original");
+
+    writeFileSync(includedPath, "[client]\npassword=rotated\n");
+    utimesSync(includedPath, fixedTime, fixedTime);
+    const second = loadMyCnf(dir, home);
+    expect(second.secrets["client.password"]).toBe("rotated");
+  });
+
+  it("detects a new .cnf file added to an !includedir", async () => {
+    const { loadMyCnf } = await import("./mycnf-loader.js");
+    const dir = tempDir();
+    const home = tempDir();
+    const includeDir = join(home, "conf.d");
+    mkdirSync(includeDir);
+    writeFileSync(join(includeDir, "a.cnf"), "[client]\nuser=root\n");
+    writeFileSync(join(home, ".my.cnf"), `!includedir ${includeDir}\n`);
+    const first = loadMyCnf(dir, home);
+    expect(first.secrets["client.password"]).toBeUndefined();
+
+    // Drop a new credentials file into the included directory.
+    writeFileSync(join(includeDir, "z-secret.cnf"), "[client]\npassword=dropped_in\n");
+    const second = loadMyCnf(dir, home);
+    expect(second.secrets["client.password"]).toBe("dropped_in");
+  });
 });

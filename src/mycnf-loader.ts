@@ -18,6 +18,9 @@ interface CacheEntry {
   filePaths: string[];
   mtimes: Record<string, number>;
   contentHashes: Record<string, string>;
+  /** Directories referenced by `!includedir`, tracked to detect added/removed files */
+  includeDirs: string[];
+  dirMtimes: Record<string, number>;
   result: MyCnfResult;
 }
 
@@ -46,6 +49,15 @@ function readFile(path: string): { content: string; mtime: number } | null {
   return { content, mtime };
 }
 
+/** Cheap mtime-only stat. Returns 0 if the path doesn't exist. */
+function tryMtime(path: string): number {
+  try {
+    return statSync(path).mtimeMs;
+  } catch {
+    return 0;
+  }
+}
+
 /**
  * Parse a single .my.cnf file, following !include / !includedir directives.
  * `visited` tracks resolved paths for cycle detection.
@@ -56,19 +68,21 @@ function parseFile(
 ): {
   sections: Record<string, Record<string, string>>;
   files: Map<string, { mtime: number; contentHash: string }>;
+  dirs: Set<string>;
 } {
   const resolved = resolve(filePath);
   const sections: Record<string, Record<string, string>> = {};
   const files = new Map<string, { mtime: number; contentHash: string }>();
+  const dirs = new Set<string>();
 
   if (visited.has(resolved)) {
-    return { sections, files };
+    return { sections, files, dirs };
   }
   visited.add(resolved);
 
   const fileData = readFile(resolved);
   if (!fileData) {
-    return { sections, files };
+    return { sections, files, dirs };
   }
 
   const { content, mtime } = fileData;
@@ -88,9 +102,11 @@ function parseFile(
       const sub = parseFile(target, visited);
       mergeSections(sections, sub.sections);
       for (const [k, v] of sub.files) files.set(k, v);
+      for (const d of sub.dirs) dirs.add(d);
     } else if (trimmed.startsWith("!includedir ")) {
       const baseDir = dirname(resolved);
       const dir = resolve(baseDir, trimmed.slice("!includedir ".length).trim());
+      dirs.add(dir);
       let entries: string[];
       try {
         entries = readdirSync(dir).filter((f) => f.endsWith(".cnf")).sort();
@@ -101,6 +117,7 @@ function parseFile(
         const sub = parseFile(join(dir, entry), visited);
         mergeSections(sections, sub.sections);
         for (const [k, v] of sub.files) files.set(k, v);
+        for (const d of sub.dirs) dirs.add(d);
       }
     } else {
       iniLines.push(line);
@@ -118,7 +135,7 @@ function parseFile(
     }
   }
 
-  return { sections, files };
+  return { sections, files, dirs };
 }
 
 /** Merge `from` sections into `into`, with `from` values winning per-field. */
@@ -156,51 +173,39 @@ function extractSecrets(
  *
  * Results are cached with mtime + SHA256 content hash.
  */
-/** Cheap mtime-only stat. Returns 0 if file doesn't exist. */
-function tryMtime(path: string): number {
-  try {
-    return statSync(path).mtimeMs;
-  } catch {
-    return 0;
-  }
-}
-
 export function loadMyCnf(projectDir: string, homeDir: string): MyCnfResult {
   const cacheKey = `${resolve(projectDir)}::${resolve(homeDir)}`;
 
-  // Fast path: check mtimes of known files. If all match AND content hashes
-  // of the two root files still match, return cached result.
-  // We always read root files (tiny) to catch same-mtime content changes,
-  // but skip re-parsing includes when nothing changed.
+  // Fast path: cheap stat check first, then re-hash every known file before
+  // serving the cache. For a secrets server, mtime alone is not enough — a
+  // rotation can preserve mtime (NFS, backup-restore, `touch -m`), so we
+  // content-hash ALL files (roots + includes), not just the roots. We also
+  // stat the tracked `!includedir` directories so a newly dropped .cnf
+  // (which bumps the directory mtime) forces a full re-parse.
   const cached = cache.get(cacheKey);
   if (cached && cached.filePaths.length > 0) {
-    const globalPath = resolve(join(homeDir, ".my.cnf"));
-    const localPath = resolve(join(projectDir, ".my.cnf"));
-
-    // Cheap stat check on all known files (roots + includes)
-    const mtimesMatch = cached.filePaths.every(
-      (p) => tryMtime(p) === cached.mtimes[p]
-    );
+    const mtimesMatch =
+      cached.filePaths.every((p) => tryMtime(p) === cached.mtimes[p]) &&
+      cached.includeDirs.every((d) => tryMtime(d) === cached.dirMtimes[d]);
 
     if (mtimesMatch) {
-      // Mtimes match — verify root file content hashes haven't changed
-      // (catches same-mtime secret rotation)
-      let rootsUnchanged = true;
-      for (const rootPath of [globalPath, localPath]) {
-        const data = readFile(rootPath);
-        if (data) {
-          const hash = createHash("sha256").update(data.content).digest("hex");
-          if (hash !== cached.contentHashes[rootPath]) {
-            rootsUnchanged = false;
-            break;
-          }
-        } else if (cached.mtimes[rootPath] !== undefined && cached.mtimes[rootPath] !== 0) {
-          rootsUnchanged = false; // file was deleted
+      // Mtimes match — verify every file's content hash (catches same-mtime
+      // rotation in roots and includes alike).
+      let unchanged = true;
+      for (const path of cached.filePaths) {
+        const data = readFile(path);
+        if (!data) {
+          unchanged = false; // file was deleted
+          break;
+        }
+        const hash = createHash("sha256").update(data.content).digest("hex");
+        if (hash !== cached.contentHashes[path]) {
+          unchanged = false;
           break;
         }
       }
 
-      if (rootsUnchanged) {
+      if (unchanged) {
         return cached.result;
       }
     }
@@ -226,6 +231,13 @@ export function loadMyCnf(projectDir: string, homeDir: string): MyCnfResult {
     contentHashes[path] = meta.contentHash;
   }
 
+  // Track !includedir directory mtimes so the fast path can spot added/removed files
+  const includeDirs = [
+    ...new Set([...globalResult.dirs, ...localResult.dirs]),
+  ].sort();
+  const dirMtimes: Record<string, number> = {};
+  for (const d of includeDirs) dirMtimes[d] = tryMtime(d);
+
   // Check content hashes — handles mtime-identical but content-changed case
   if (
     cached &&
@@ -233,8 +245,15 @@ export function loadMyCnf(projectDir: string, homeDir: string): MyCnfResult {
     filePaths.every((p, i) => p === cached.filePaths[i]) &&
     filePaths.every((p) => contentHashes[p] === cached.contentHashes[p])
   ) {
-    // Content unchanged despite mtime change — update mtimes and return cached
-    cache.set(cacheKey, { filePaths, mtimes, contentHashes, result: cached.result });
+    // Content unchanged despite mtime change — update metadata and return cached
+    cache.set(cacheKey, {
+      filePaths,
+      mtimes,
+      contentHashes,
+      includeDirs,
+      dirMtimes,
+      result: cached.result,
+    });
     return cached.result;
   }
 
@@ -246,6 +265,13 @@ export function loadMyCnf(projectDir: string, homeDir: string): MyCnfResult {
   const secrets = extractSecrets(sections);
   const result: MyCnfResult = { sections, secrets };
 
-  cache.set(cacheKey, { filePaths, mtimes, contentHashes, result });
+  cache.set(cacheKey, {
+    filePaths,
+    mtimes,
+    contentHashes,
+    includeDirs,
+    dirMtimes,
+    result,
+  });
   return result;
 }
