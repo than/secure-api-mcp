@@ -1,11 +1,9 @@
 import { z } from "zod";
 import { isAbsolute } from "node:path";
 import { homedir } from "node:os";
-import { loadMyCnf } from "../mycnf-loader.js";
+import { loadMyCnf, SECRET_FIELDS } from "../mycnf-loader.js";
 import { validateProjectDir } from "../security/path-validator.js";
 import { auditLog } from "../security/audit.js";
-
-const SECRET_FIELDS = new Set(["user", "password", "host"]);
 
 export const ReadMyCnfSchema = z.object({
   project_dir: z

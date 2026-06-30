@@ -13,13 +13,13 @@ export const ApiCallSchema = z.object({
     .string()
     .refine((p) => isAbsolute(p), "project_dir must be an absolute path")
     .describe("Absolute path to the project directory"),
-  url: z.string().url().describe("Request URL"),
+  url: z.url().describe("Request URL"),
   method: z
     .enum(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"])
     .optional()
     .default("GET"),
   headers: z
-    .record(z.string())
+    .record(z.string(), z.string())
     .optional()
     .describe("Headers — use {{KEY_NAME}} to inject env values"),
   body: z.string().optional().describe("Request body"),

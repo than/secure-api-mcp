@@ -14,8 +14,9 @@ A secret can only be protected if you control where it goes. Both tools can send
 ## Tools
 
 - **`get_env_keys(project_dir)`** — Returns key names from `.env`. No values exposed.
-- **`run_with_env(project_dir, command, env_keys?, timeout_ms?)`** — Runs a shell command with `.env` vars injected. Output is sanitized — secret values replaced with `[REDACTED:KEY_NAME]`.
+- **`run_with_env(project_dir, command, env_keys?, timeout_ms?, include_mycnf?)`** — Runs a shell command with `.env` vars injected. Output is sanitized — secret values replaced with `[REDACTED:KEY_NAME]`. Set `include_mycnf` to also sanitize MySQL credentials from `.my.cnf` in command output.
 - **`api_call(project_dir, url, method?, headers?, body?, auth_env_key?, timeout_ms?)`** — HTTP request with secret injection. `auth_env_key` adds a Bearer token. Headers support `{{KEY_NAME}}` template syntax. When a secret is injected, the destination host is checked against `SECURE_API_ALLOWED_HOSTS` (see below). Times out after `timeout_ms` (default 30s).
+- **`read_mycnf(project_dir, section?)`** — Reads MySQL `.my.cnf` configuration. Returns section names and safe fields (`port`, `database`, `socket`) with credentials (`user`, `password`, `host`) redacted as `[REDACTED:section.field]`. Checks `~/.my.cnf` and project-local `.my.cnf`.
 - **`sync_env_example(project_dir)`** — Generates/updates `.env.example` from `.env`. Preserves comments and structure, strips values, uses smart placeholders.
 
 ## Setup
@@ -61,6 +62,12 @@ export SECURE_API_ALLOWED_HOSTS="api.stripe.com,api.github.com,*.internal.exampl
 - **Unset** — secrets are still sent (so existing setups keep working), but the response includes a `warnings` entry naming the destination host.
 
 Requests that inject no secret are never gated.
+
+## MySQL `.my.cnf` support
+
+Claude can work with MySQL configs without seeing your credentials. `read_mycnf` exposes structural fields (`port`, `database`, `socket`) while redacting `user`, `password`, and `host`. When running MySQL commands via `run_with_env`, set `include_mycnf: true` to sanitize any credential values that appear in command output — the `mysql` CLI reads `~/.my.cnf` natively, so no env var injection is needed.
+
+Resolution order matches MySQL's own: `~/.my.cnf` (global), then `<project_dir>/.my.cnf` (project-local overrides global per-field). `!include` and `!includedir` directives are followed. Includes in the project-local chain are contained to the project directory (resolved through symlinks) so a crafted project `.my.cnf` can't disclose files elsewhere on disk; the trusted global `~/.my.cnf` chain is unrestricted.
 
 ## How sanitization works
 
