@@ -284,6 +284,29 @@ describe("loadMyCnf - include containment", () => {
     const result = loadMyCnf(dir, home);
     expect(result.sections.client?.password).toBe("systemwide");
   });
+
+  // Regression guard for the integration boundary between containment (this PR)
+  // and the cache fast-path (#48): containment must skip only files that EXIST
+  // out of bounds. An absent in-project include target must still be tracked as
+  // "missing" so the fast path notices it appearing later — otherwise a freshly
+  // added credentials file would be served stale.
+  it("picks up a contained in-project !include target created after the cache was populated", async () => {
+    const { loadMyCnf } = await import("./mycnf-loader.js");
+    const dir = tempDir();
+    const home = tempDir();
+    // Project-local root references later.cnf, which does not exist yet.
+    writeFileSync(
+      join(dir, ".my.cnf"),
+      "[client]\nuser=root\n!include ./later.cnf\n"
+    );
+    const first = loadMyCnf(dir, home);
+    expect(first.secrets["client.password"]).toBeUndefined();
+
+    // The in-project include target appears mid-session.
+    writeFileSync(join(dir, "later.cnf"), "[client]\npassword=appeared\n");
+    const second = loadMyCnf(dir, home);
+    expect(second.secrets["client.password"]).toBe("appeared");
+  });
 });
 
 describe("loadMyCnf - caching", () => {
