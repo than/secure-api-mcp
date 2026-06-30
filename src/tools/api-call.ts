@@ -48,7 +48,10 @@ function interpolateHeaders(
   const injectedKeys: string[] = [];
   for (const [key, value] of Object.entries(headers)) {
     result[key] = value.replace(/\{\{(\w+)\}\}/g, (_, envKey: string) => {
-      if (envKey in env) {
+      // Object.hasOwn, not `in`: `in` matches inherited Object.prototype names
+      // (constructor, toString, __proto__, …), which would stringify a function
+      // into the header and falsely flag the request as secret-bearing.
+      if (Object.hasOwn(env, envKey)) {
         injectedKeys.push(envKey);
         return env[envKey];
       }

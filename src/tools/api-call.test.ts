@@ -230,4 +230,20 @@ describe("apiCall - destination allowlist", () => {
     expect(mockFetch).toHaveBeenCalled();
     expect(result.body).toBe("OK");
   });
+
+  it("treats inherited Object.prototype names as non-keys (no false secret injection)", async () => {
+    // {{constructor}} is not a real env key; `in` would match Object.prototype
+    // and wrongly classify this as secret-bearing, gating it against the allowlist.
+    process.env.SECURE_API_ALLOWED_HOSTS = "api.allowed.com";
+    await apiCall({
+      project_dir: "/fake/project",
+      url: "https://example.com",
+      headers: { "X-Test": "{{constructor}}" },
+    });
+    // Not gated/blocked — the request carries no real secret...
+    expect(mockFetch).toHaveBeenCalled();
+    // ...and the template is left untouched (no stringified function leaked in).
+    const sentHeaders = mockFetch.mock.calls[0][1].headers;
+    expect(sentHeaders["X-Test"]).toBe("{{constructor}}");
+  });
 });
