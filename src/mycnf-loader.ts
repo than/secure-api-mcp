@@ -18,8 +18,13 @@ interface CacheEntry {
   filePaths: string[];
   mtimes: Record<string, number>;
   contentHashes: Record<string, string>;
-  /** Directories referenced by `!includedir`, re-listed on the fast path to detect added files */
-  includeDirs: string[];
+  /**
+   * `!includedir` path -> sorted `.cnf` listing at parse time. Re-listed on the
+   * fast path to detect added/removed entries (robust even if the dir mtime is
+   * preserved). Comparing the raw listing — not just parsed files — means a
+   * containment-skipped entry that persists doesn't perpetually invalidate.
+   */
+  dirListings: Record<string, string[]>;
   /** Referenced paths (roots / !include targets) that were absent — watched for appearance */
   missingPaths: string[];
   result: MyCnfResult;
@@ -98,19 +103,20 @@ function parseFile(
 ): {
   sections: Record<string, Record<string, string>>;
   files: Map<string, { mtime: number; contentHash: string }>;
-  dirs: Set<string>;
+  dirListings: Map<string, string[]>;
   missing: Set<string>;
 } {
   const resolved = resolve(filePath);
   const sections: Record<string, Record<string, string>> = {};
   const files = new Map<string, { mtime: number; contentHash: string }>();
-  const dirs = new Set<string>();
+  // `!includedir` path -> its sorted .cnf listing, for fast-path membership checks.
+  const dirListings = new Map<string, string[]>();
   // Paths that were referenced (roots / !include targets) but did not exist.
   // Tracked so the cache fast path can detect one appearing later.
   const missing = new Set<string>();
 
   if (visited.has(resolved)) {
-    return { sections, files, dirs, missing };
+    return { sections, files, dirListings, missing };
   }
   visited.add(resolved);
 
@@ -125,14 +131,14 @@ function parseFile(
   if (containTo) {
     const real = tryRealpath(resolved);
     if (real && !isWithin(containTo, real)) {
-      return { sections, files, dirs, missing };
+      return { sections, files, dirListings, missing };
     }
   }
 
   const fileData = readFile(resolved);
   if (!fileData) {
     missing.add(resolved);
-    return { sections, files, dirs, missing };
+    return { sections, files, dirListings, missing };
   }
 
   const { content, mtime } = fileData;
@@ -154,7 +160,7 @@ function parseFile(
       const sub = parseFile(target, visited, containTo);
       mergeSections(sections, sub.sections);
       for (const [k, v] of sub.files) files.set(k, v);
-      for (const d of sub.dirs) dirs.add(d);
+      for (const [k, v] of sub.dirListings) dirListings.set(k, v);
       for (const m of sub.missing) missing.add(m);
     } else if (trimmed.startsWith("!includedir ")) {
       const baseDir = dirname(resolved);
@@ -166,20 +172,22 @@ function parseFile(
         const realDir = tryRealpath(dir);
         if (realDir && !isWithin(containTo, realDir)) continue;
       }
-      // Track in-bounds includedirs so the fast path can re-list them and
-      // detect a newly dropped .cnf even if the dir mtime is preserved.
-      dirs.add(dir);
       let entries: string[];
       try {
         entries = readdirSync(dir).filter((f) => f.endsWith(".cnf")).sort();
       } catch {
         entries = [];
       }
+      // Snapshot the raw listing so the fast path can spot added/removed entries
+      // even if the dir mtime is preserved. Recording all entries (not just the
+      // ones that parse cleanly) keeps a containment-skipped entry from forcing a
+      // reparse on every call.
+      dirListings.set(dir, entries);
       for (const entry of entries) {
         const sub = parseFile(join(dir, entry), visited, containTo);
         mergeSections(sections, sub.sections);
         for (const [k, v] of sub.files) files.set(k, v);
-        for (const d of sub.dirs) dirs.add(d);
+        for (const [k, v] of sub.dirListings) dirListings.set(k, v);
         for (const m of sub.missing) missing.add(m);
       }
     } else {
@@ -198,7 +206,7 @@ function parseFile(
     }
   }
 
-  return { sections, files, dirs, missing };
+  return { sections, files, dirListings, missing };
 }
 
 /** Merge `from` sections into `into`, with `from` values winning per-field. */
@@ -250,22 +258,22 @@ export function loadMyCnf(projectDir: string, homeDir: string): MyCnfResult {
   // is robust even if the directory's own mtime was preserved.
   const cached = cache.get(cacheKey);
   if (cached) {
-    const knownFiles = new Set(cached.filePaths);
-
     const appeared = cached.missingPaths.some((p) => tryMtime(p) !== 0);
     const mtimesMatch = cached.filePaths.every(
       (p) => tryMtime(p) === cached.mtimes[p]
     );
     const membershipUnchanged =
       !appeared &&
-      cached.includeDirs.every((dir) => {
+      Object.entries(cached.dirListings).every(([dir, prev]) => {
         let entries: string[];
         try {
-          entries = readdirSync(dir).filter((f) => f.endsWith(".cnf"));
+          entries = readdirSync(dir).filter((f) => f.endsWith(".cnf")).sort();
         } catch {
           entries = [];
         }
-        return entries.every((e) => knownFiles.has(resolve(join(dir, e))));
+        return (
+          entries.length === prev.length && entries.every((e, i) => e === prev[i])
+        );
       });
 
     if (mtimesMatch && membershipUnchanged) {
@@ -319,11 +327,11 @@ export function loadMyCnf(projectDir: string, homeDir: string): MyCnfResult {
     contentHashes[path] = meta.contentHash;
   }
 
-  // !includedir directories (re-listed on the fast path) and referenced-but-absent
+  // !includedir listings (re-listed on the fast path) and referenced-but-absent
   // paths (watched for appearance) — both needed to detect file-set changes.
-  const includeDirs = [
-    ...new Set([...globalResult.dirs, ...localResult.dirs]),
-  ].sort();
+  const dirListings: Record<string, string[]> = {};
+  for (const [k, v] of globalResult.dirListings) dirListings[k] = v;
+  for (const [k, v] of localResult.dirListings) dirListings[k] = v;
   const missingPaths = [
     ...new Set([...globalResult.missing, ...localResult.missing]),
   ].sort();
@@ -340,7 +348,7 @@ export function loadMyCnf(projectDir: string, homeDir: string): MyCnfResult {
       filePaths,
       mtimes,
       contentHashes,
-      includeDirs,
+      dirListings,
       missingPaths,
       result: cached.result,
     });
@@ -359,7 +367,7 @@ export function loadMyCnf(projectDir: string, homeDir: string): MyCnfResult {
     filePaths,
     mtimes,
     contentHashes,
-    includeDirs,
+    dirListings,
     missingPaths,
     result,
   });

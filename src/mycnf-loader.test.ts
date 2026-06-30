@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import {
   mkdtempSync,
   writeFileSync,
@@ -9,6 +9,13 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+
+// Spy on ini.parse (wrapping the real impl) so tests can assert whether a call
+// re-parsed (full path) or served the cache fast path (no parse).
+vi.mock("ini", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("ini")>();
+  return { ...actual, parse: vi.fn(actual.parse) };
+});
 
 function makeTempDir(): string {
   return mkdtempSync(join(tmpdir(), "mycnf-loader-test-"));
@@ -318,6 +325,38 @@ describe("loadMyCnf - caching", () => {
     const first = loadMyCnf(dir, home);
     const second = loadMyCnf(dir, home);
     expect(second).toBe(first);
+  });
+
+  // Issue #58: a contained-out symlink entry in a project !includedir is skipped
+  // at parse time, so it is never a "known file". The fast path must still serve
+  // the cache (no reparse) instead of bailing on every call just because that
+  // entry shows up in the directory listing.
+  it("serves the cache fast path when an !includedir holds a contained-out symlink entry", async () => {
+    const { loadMyCnf } = await import("./mycnf-loader.js");
+    const { parse } = await import("ini");
+    const mockParse = vi.mocked(parse);
+
+    const dir = tempDir();
+    const home = tempDir();
+    const outside = tempDir();
+    writeFileSync(join(outside, "secrets.cnf"), "[client]\nport=8888\n");
+    const confd = join(dir, "conf.d");
+    mkdirSync(confd);
+    writeFileSync(join(confd, "ok.cnf"), "[client]\nuser=root\n");
+    symlinkSync(join(outside, "secrets.cnf"), join(confd, "evil.cnf"));
+    writeFileSync(join(dir, ".my.cnf"), "[client]\n!includedir ./conf.d\n");
+
+    const first = loadMyCnf(dir, home); // warm the cache
+    expect(first.sections.client?.user).toBe("root");
+    expect(first.sections.client?.port).toBeUndefined(); // out-of-bounds not disclosed
+
+    mockParse.mockClear();
+    const second = loadMyCnf(dir, home);
+    // Fast path served the cache — nothing was re-parsed...
+    expect(mockParse).not.toHaveBeenCalled();
+    // ...and the same cached result is returned, still without the secret.
+    expect(second).toBe(first);
+    expect(second.sections.client?.port).toBeUndefined();
   });
 
   it("returns fresh result when content changes but mtime is identical", async () => {
