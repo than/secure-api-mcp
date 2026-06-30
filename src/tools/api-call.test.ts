@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // Mock modules before importing the module under test
 vi.mock("../security/audit.js");
@@ -142,5 +142,108 @@ describe("apiCall - fetch error handling", () => {
       "https://example.com/api/data",
       expect.objectContaining({ method: "GET", dispatcher: expect.anything() })
     );
+  });
+
+  it("reports a timeout when fetch aborts", async () => {
+    // Reject with the *real* abort reason the runtime sets when apiCall's
+    // internal AbortController fires (a DOMException), not a hand-built Error.
+    // This verifies the friendly-message branch (instanceof Error && name ===
+    // "AbortError") actually holds for a genuine abort on the Node target — a
+    // synthetic Error would mask a regression if that ever stopped being true.
+    mockFetch.mockImplementation(
+      (_url: string, opts: { signal: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          opts.signal.addEventListener("abort", () =>
+            reject(opts.signal.reason)
+          );
+        })
+    );
+    const result = await apiCall({
+      project_dir: "/fake/project",
+      url: "https://example.com",
+      timeout_ms: 1,
+    });
+    expect(result.body).toBe("Fetch failed: Request timed out after 1ms");
+  });
+
+  it("passes an abort signal to fetch", async () => {
+    await apiCall({ project_dir: "/fake/project", url: "https://example.com" });
+    expect(mockFetch).toHaveBeenCalledWith(
+      "https://example.com",
+      expect.objectContaining({ signal: expect.anything() })
+    );
+  });
+});
+
+describe("apiCall - destination allowlist", () => {
+  const ORIGINAL = process.env.SECURE_API_ALLOWED_HOSTS;
+  afterEach(() => {
+    if (ORIGINAL === undefined) delete process.env.SECURE_API_ALLOWED_HOSTS;
+    else process.env.SECURE_API_ALLOWED_HOSTS = ORIGINAL;
+  });
+
+  it("warns but still sends when no allowlist is configured", async () => {
+    delete process.env.SECURE_API_ALLOWED_HOSTS;
+    const result = await apiCall({
+      project_dir: "/fake/project",
+      url: "https://example.com",
+      auth_env_key: "MY_TOKEN",
+    });
+    expect(mockFetch).toHaveBeenCalled();
+    expect(result.warnings?.[0]).toContain("example.com");
+  });
+
+  it("blocks and does not send when host is off the allowlist", async () => {
+    process.env.SECURE_API_ALLOWED_HOSTS = "api.allowed.com";
+    const result = await apiCall({
+      project_dir: "/fake/project",
+      url: "https://example.com",
+      auth_env_key: "MY_TOKEN",
+    });
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(result.status).toBe(0);
+    expect(result.body).toContain("Request blocked");
+    expect(mockAuditLog).toHaveBeenCalledWith(
+      "api_call",
+      expect.objectContaining({ status: "blocked" })
+    );
+  });
+
+  it("sends without warning when host is on the allowlist", async () => {
+    process.env.SECURE_API_ALLOWED_HOSTS = "example.com";
+    const result = await apiCall({
+      project_dir: "/fake/project",
+      url: "https://example.com",
+      auth_env_key: "MY_TOKEN",
+    });
+    expect(mockFetch).toHaveBeenCalled();
+    expect(result.warnings).toBeUndefined();
+  });
+
+  it("does not gate requests that carry no secret", async () => {
+    process.env.SECURE_API_ALLOWED_HOSTS = "api.allowed.com";
+    const result = await apiCall({
+      project_dir: "/fake/project",
+      url: "https://example.com",
+      headers: { "Content-Type": "application/json" },
+    });
+    expect(mockFetch).toHaveBeenCalled();
+    expect(result.body).toBe("OK");
+  });
+
+  it("treats inherited Object.prototype names as non-keys (no false secret injection)", async () => {
+    // {{constructor}} is not a real env key; `in` would match Object.prototype
+    // and wrongly classify this as secret-bearing, gating it against the allowlist.
+    process.env.SECURE_API_ALLOWED_HOSTS = "api.allowed.com";
+    await apiCall({
+      project_dir: "/fake/project",
+      url: "https://example.com",
+      headers: { "X-Test": "{{constructor}}" },
+    });
+    // Not gated/blocked — the request carries no real secret...
+    expect(mockFetch).toHaveBeenCalled();
+    // ...and the template is left untouched (no stringified function leaked in).
+    const sentHeaders = mockFetch.mock.calls[0][1].headers;
+    expect(sentHeaders["X-Test"]).toBe("{{constructor}}");
   });
 });

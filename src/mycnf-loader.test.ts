@@ -1,13 +1,21 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import {
   mkdtempSync,
   writeFileSync,
   mkdirSync,
   rmSync,
   utimesSync,
+  symlinkSync,
 } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+
+// Spy on ini.parse (wrapping the real impl) so tests can assert whether a call
+// re-parsed (full path) or served the cache fast path (no parse).
+vi.mock("ini", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("ini")>();
+  return { ...actual, parse: vi.fn(actual.parse) };
+});
 
 function makeTempDir(): string {
   return mkdtempSync(join(tmpdir(), "mycnf-loader-test-"));
@@ -203,6 +211,111 @@ describe("loadMyCnf - !includedir directive", () => {
   });
 });
 
+describe("loadMyCnf - include containment", () => {
+  it("ignores a project-local !include that points outside the project", async () => {
+    const { loadMyCnf } = await import("./mycnf-loader.js");
+    const dir = tempDir();
+    const home = tempDir();
+    const outside = tempDir();
+    // A file outside the project that a crafted include would try to disclose.
+    writeFileSync(join(outside, "secrets.cnf"), "[client]\nport=9999\n");
+    writeFileSync(
+      join(dir, ".my.cnf"),
+      `[client]\nuser=root\n!include ${join(outside, "secrets.cnf")}\n`
+    );
+    const result = loadMyCnf(dir, home);
+    // The local section is read, but the out-of-bounds include is skipped.
+    expect(result.sections.client?.user).toBe("root");
+    expect(result.sections.client?.port).toBeUndefined();
+  });
+
+  it("still follows project-local includes that stay within the project", async () => {
+    const { loadMyCnf } = await import("./mycnf-loader.js");
+    const dir = tempDir();
+    const home = tempDir();
+    writeFileSync(join(dir, "extra.cnf"), "[client]\npassword=inproject\n");
+    writeFileSync(
+      join(dir, ".my.cnf"),
+      "[client]\nuser=root\n!include extra.cnf\n"
+    );
+    const result = loadMyCnf(dir, home);
+    expect(result.sections.client?.password).toBe("inproject");
+  });
+
+  it("ignores a project-local !include whose in-project target symlinks outside", async () => {
+    const { loadMyCnf } = await import("./mycnf-loader.js");
+    const dir = tempDir();
+    const home = tempDir();
+    const outside = tempDir();
+    writeFileSync(join(outside, "secrets.cnf"), "[client]\nport=9999\n");
+    // innocent.cnf lives inside the project but is a symlink to the outside file.
+    symlinkSync(join(outside, "secrets.cnf"), join(dir, "innocent.cnf"));
+    writeFileSync(
+      join(dir, ".my.cnf"),
+      "[client]\nuser=root\n!include ./innocent.cnf\n"
+    );
+    const result = loadMyCnf(dir, home);
+    expect(result.sections.client?.user).toBe("root");
+    expect(result.sections.client?.port).toBeUndefined();
+  });
+
+  it("ignores an !includedir entry that symlinks outside the project", async () => {
+    const { loadMyCnf } = await import("./mycnf-loader.js");
+    const dir = tempDir();
+    const home = tempDir();
+    const outside = tempDir();
+    writeFileSync(join(outside, "secrets.cnf"), "[client]\nport=8888\n");
+    const confd = join(dir, "conf.d");
+    mkdirSync(confd);
+    // An in-project includedir entry that is a symlink to the outside file.
+    symlinkSync(join(outside, "secrets.cnf"), join(confd, "evil.cnf"));
+    writeFileSync(
+      join(dir, ".my.cnf"),
+      "[client]\nuser=root\n!includedir ./conf.d\n"
+    );
+    const result = loadMyCnf(dir, home);
+    expect(result.sections.client?.user).toBe("root");
+    expect(result.sections.client?.port).toBeUndefined();
+  });
+
+  it("allows the global ~/.my.cnf chain to include files outside the home dir", async () => {
+    const { loadMyCnf } = await import("./mycnf-loader.js");
+    const dir = tempDir();
+    const home = tempDir();
+    const elsewhere = tempDir();
+    writeFileSync(join(elsewhere, "system.cnf"), "[client]\npassword=systemwide\n");
+    writeFileSync(
+      join(home, ".my.cnf"),
+      `[client]\nuser=root\n!include ${join(elsewhere, "system.cnf")}\n`
+    );
+    const result = loadMyCnf(dir, home);
+    expect(result.sections.client?.password).toBe("systemwide");
+  });
+
+  // Regression guard for the integration boundary between containment (this PR)
+  // and the cache fast-path (#48): containment must skip only files that EXIST
+  // out of bounds. An absent in-project include target must still be tracked as
+  // "missing" so the fast path notices it appearing later — otherwise a freshly
+  // added credentials file would be served stale.
+  it("picks up a contained in-project !include target created after the cache was populated", async () => {
+    const { loadMyCnf } = await import("./mycnf-loader.js");
+    const dir = tempDir();
+    const home = tempDir();
+    // Project-local root references later.cnf, which does not exist yet.
+    writeFileSync(
+      join(dir, ".my.cnf"),
+      "[client]\nuser=root\n!include ./later.cnf\n"
+    );
+    const first = loadMyCnf(dir, home);
+    expect(first.secrets["client.password"]).toBeUndefined();
+
+    // The in-project include target appears mid-session.
+    writeFileSync(join(dir, "later.cnf"), "[client]\npassword=appeared\n");
+    const second = loadMyCnf(dir, home);
+    expect(second.secrets["client.password"]).toBe("appeared");
+  });
+});
+
 describe("loadMyCnf - caching", () => {
   it("returns same reference on cache hit", async () => {
     const { loadMyCnf } = await import("./mycnf-loader.js");
@@ -212,6 +325,38 @@ describe("loadMyCnf - caching", () => {
     const first = loadMyCnf(dir, home);
     const second = loadMyCnf(dir, home);
     expect(second).toBe(first);
+  });
+
+  // Issue #58: a contained-out symlink entry in a project !includedir is skipped
+  // at parse time, so it is never a "known file". The fast path must still serve
+  // the cache (no reparse) instead of bailing on every call just because that
+  // entry shows up in the directory listing.
+  it("serves the cache fast path when an !includedir holds a contained-out symlink entry", async () => {
+    const { loadMyCnf } = await import("./mycnf-loader.js");
+    const { parse } = await import("ini");
+    const mockParse = vi.mocked(parse);
+
+    const dir = tempDir();
+    const home = tempDir();
+    const outside = tempDir();
+    writeFileSync(join(outside, "secrets.cnf"), "[client]\nport=8888\n");
+    const confd = join(dir, "conf.d");
+    mkdirSync(confd);
+    writeFileSync(join(confd, "ok.cnf"), "[client]\nuser=root\n");
+    symlinkSync(join(outside, "secrets.cnf"), join(confd, "evil.cnf"));
+    writeFileSync(join(dir, ".my.cnf"), "[client]\n!includedir ./conf.d\n");
+
+    const first = loadMyCnf(dir, home); // warm the cache
+    expect(first.sections.client?.user).toBe("root");
+    expect(first.sections.client?.port).toBeUndefined(); // out-of-bounds not disclosed
+
+    mockParse.mockClear();
+    const second = loadMyCnf(dir, home);
+    // Fast path served the cache — nothing was re-parsed...
+    expect(mockParse).not.toHaveBeenCalled();
+    // ...and the same cached result is returned, still without the secret.
+    expect(second).toBe(first);
+    expect(second.sections.client?.port).toBeUndefined();
   });
 
   it("returns fresh result when content changes but mtime is identical", async () => {

@@ -1,6 +1,6 @@
-import { readFileSync, statSync, readdirSync } from "node:fs";
+import { readFileSync, statSync, readdirSync, realpathSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { parse } from "ini";
 
 /** Fields whose values are considered secrets and fed to the sanitizer. */
@@ -18,8 +18,13 @@ interface CacheEntry {
   filePaths: string[];
   mtimes: Record<string, number>;
   contentHashes: Record<string, string>;
-  /** Directories referenced by `!includedir`, re-listed on the fast path to detect added files */
-  includeDirs: string[];
+  /**
+   * `!includedir` path -> sorted `.cnf` listing at parse time. Re-listed on the
+   * fast path to detect added/removed entries (robust even if the dir mtime is
+   * preserved). Comparing the raw listing — not just parsed files — means a
+   * containment-skipped entry that persists doesn't perpetually invalidate.
+   */
+  dirListings: Record<string, string[]>;
   /** Referenced paths (roots / !include targets) that were absent — watched for appearance */
   missingPaths: string[];
   result: MyCnfResult;
@@ -50,6 +55,26 @@ function readFile(path: string): { content: string; mtime: number } | null {
   return { content, mtime };
 }
 
+/** True if `target` resolves to `root` or a path nested under it. */
+function isWithin(root: string, target: string): boolean {
+  const r = resolve(root);
+  const t = resolve(target);
+  return t === r || t.startsWith(r + sep);
+}
+
+/**
+ * Canonical (symlink-resolved) path, or null if it can't be resolved (ENOENT).
+ * Used for containment checks: a lexical `resolve()` does not follow symlinks,
+ * so an in-project symlink could otherwise point at an out-of-bounds file.
+ */
+function tryRealpath(path: string): string | null {
+  try {
+    return realpathSync(path);
+  } catch {
+    return null;
+  }
+}
+
 /** Cheap mtime-only stat. Returns 0 if the path doesn't exist. */
 function tryMtime(path: string): number {
   try {
@@ -62,33 +87,58 @@ function tryMtime(path: string): number {
 /**
  * Parse a single .my.cnf file, following !include / !includedir directives.
  * `visited` tracks resolved paths for cycle detection.
+ *
+ * `containTo`, when set, restricts !include / !includedir targets to paths
+ * within that directory. This is applied to the project-local chain, whose
+ * .my.cnf may be attacker-supplied (e.g. committed to a repo), to stop a
+ * crafted include from pulling in arbitrary files elsewhere on disk —
+ * read_mycnf returns non-secret fields verbatim, so an unbounded include
+ * would be a file-disclosure primitive. The trusted global (~/.my.cnf) chain
+ * is parsed with no containment so legitimate /etc includes still work.
  */
 function parseFile(
   filePath: string,
-  visited: Set<string>
+  visited: Set<string>,
+  containTo?: string
 ): {
   sections: Record<string, Record<string, string>>;
   files: Map<string, { mtime: number; contentHash: string }>;
-  dirs: Set<string>;
+  dirListings: Map<string, string[]>;
   missing: Set<string>;
 } {
   const resolved = resolve(filePath);
   const sections: Record<string, Record<string, string>> = {};
   const files = new Map<string, { mtime: number; contentHash: string }>();
-  const dirs = new Set<string>();
+  // `!includedir` path -> its sorted .cnf listing, for fast-path membership checks.
+  const dirListings = new Map<string, string[]>();
   // Paths that were referenced (roots / !include targets) but did not exist.
   // Tracked so the cache fast path can detect one appearing later.
   const missing = new Set<string>();
 
   if (visited.has(resolved)) {
-    return { sections, files, dirs, missing };
+    return { sections, files, dirListings, missing };
   }
   visited.add(resolved);
+
+  // Containment for the untrusted project-local chain: the *real* (symlink-
+  // resolved) path of every file we actually read must stay within `containTo`.
+  // Enforcing here — at the read point — covers !include targets, !includedir
+  // entries, and a symlinked .my.cnf alike. A purely lexical check on the
+  // directive target would let an in-project symlink escape the project.
+  // Skip only a path that EXISTS but whose canonical location is out of bounds.
+  // An unresolvable path (ENOENT) falls through to readFile, which records it in
+  // `missing` so the fast path still notices if it later appears.
+  if (containTo) {
+    const real = tryRealpath(resolved);
+    if (real && !isWithin(containTo, real)) {
+      return { sections, files, dirListings, missing };
+    }
+  }
 
   const fileData = readFile(resolved);
   if (!fileData) {
     missing.add(resolved);
-    return { sections, files, dirs, missing };
+    return { sections, files, dirListings, missing };
   }
 
   const { content, mtime } = fileData;
@@ -105,26 +155,39 @@ function parseFile(
     if (trimmed.startsWith("!include ")) {
       const baseDir = dirname(resolved);
       const target = resolve(baseDir, trimmed.slice("!include ".length).trim());
-      const sub = parseFile(target, visited);
+      // Containment is enforced authoritatively at parseFile's read point
+      // (canonical-path check), which also catches symlinked targets.
+      const sub = parseFile(target, visited, containTo);
       mergeSections(sections, sub.sections);
       for (const [k, v] of sub.files) files.set(k, v);
-      for (const d of sub.dirs) dirs.add(d);
+      for (const [k, v] of sub.dirListings) dirListings.set(k, v);
       for (const m of sub.missing) missing.add(m);
     } else if (trimmed.startsWith("!includedir ")) {
       const baseDir = dirname(resolved);
       const dir = resolve(baseDir, trimmed.slice("!includedir ".length).trim());
-      dirs.add(dir);
+      // Skip a directory that exists but whose real path is out of bounds; each
+      // entry is still re-checked by canonical path when parseFile reads it. An
+      // absent dir falls through so a later-created one is still tracked/detected.
+      if (containTo) {
+        const realDir = tryRealpath(dir);
+        if (realDir && !isWithin(containTo, realDir)) continue;
+      }
       let entries: string[];
       try {
         entries = readdirSync(dir).filter((f) => f.endsWith(".cnf")).sort();
       } catch {
         entries = [];
       }
+      // Snapshot the raw listing so the fast path can spot added/removed entries
+      // even if the dir mtime is preserved. Recording all entries (not just the
+      // ones that parse cleanly) keeps a containment-skipped entry from forcing a
+      // reparse on every call.
+      dirListings.set(dir, entries);
       for (const entry of entries) {
-        const sub = parseFile(join(dir, entry), visited);
+        const sub = parseFile(join(dir, entry), visited, containTo);
         mergeSections(sections, sub.sections);
         for (const [k, v] of sub.files) files.set(k, v);
-        for (const d of sub.dirs) dirs.add(d);
+        for (const [k, v] of sub.dirListings) dirListings.set(k, v);
         for (const m of sub.missing) missing.add(m);
       }
     } else {
@@ -143,7 +206,7 @@ function parseFile(
     }
   }
 
-  return { sections, files, dirs, missing };
+  return { sections, files, dirListings, missing };
 }
 
 /** Merge `from` sections into `into`, with `from` values winning per-field. */
@@ -195,22 +258,22 @@ export function loadMyCnf(projectDir: string, homeDir: string): MyCnfResult {
   // is robust even if the directory's own mtime was preserved.
   const cached = cache.get(cacheKey);
   if (cached) {
-    const knownFiles = new Set(cached.filePaths);
-
     const appeared = cached.missingPaths.some((p) => tryMtime(p) !== 0);
     const mtimesMatch = cached.filePaths.every(
       (p) => tryMtime(p) === cached.mtimes[p]
     );
     const membershipUnchanged =
       !appeared &&
-      cached.includeDirs.every((dir) => {
+      Object.entries(cached.dirListings).every(([dir, prev]) => {
         let entries: string[];
         try {
-          entries = readdirSync(dir).filter((f) => f.endsWith(".cnf"));
+          entries = readdirSync(dir).filter((f) => f.endsWith(".cnf")).sort();
         } catch {
           entries = [];
         }
-        return entries.every((e) => knownFiles.has(resolve(join(dir, e))));
+        return (
+          entries.length === prev.length && entries.every((e, i) => e === prev[i])
+        );
       });
 
     if (mtimesMatch && membershipUnchanged) {
@@ -240,8 +303,16 @@ export function loadMyCnf(projectDir: string, homeDir: string): MyCnfResult {
   const globalVisited = new Set<string>();
   const globalResult = parseFile(join(homeDir, ".my.cnf"), globalVisited);
 
+  // Contain the project-local chain to the project directory: its .my.cnf may
+  // be untrusted, so its includes must not reach outside the project. Contain
+  // against the canonical project path so a symlinked project root (e.g. macOS
+  // /tmp -> /private/tmp) doesn't reject legitimate in-project includes.
   const localVisited = new Set<string>();
-  const localResult = parseFile(join(projectDir, ".my.cnf"), localVisited);
+  const localResult = parseFile(
+    join(projectDir, ".my.cnf"),
+    localVisited,
+    tryRealpath(projectDir) ?? resolve(projectDir)
+  );
 
   // Collect all file metadata
   const allFiles = new Map<string, { mtime: number; contentHash: string }>();
@@ -256,11 +327,11 @@ export function loadMyCnf(projectDir: string, homeDir: string): MyCnfResult {
     contentHashes[path] = meta.contentHash;
   }
 
-  // !includedir directories (re-listed on the fast path) and referenced-but-absent
+  // !includedir listings (re-listed on the fast path) and referenced-but-absent
   // paths (watched for appearance) — both needed to detect file-set changes.
-  const includeDirs = [
-    ...new Set([...globalResult.dirs, ...localResult.dirs]),
-  ].sort();
+  const dirListings: Record<string, string[]> = {};
+  for (const [k, v] of globalResult.dirListings) dirListings[k] = v;
+  for (const [k, v] of localResult.dirListings) dirListings[k] = v;
   const missingPaths = [
     ...new Set([...globalResult.missing, ...localResult.missing]),
   ].sort();
@@ -277,7 +348,7 @@ export function loadMyCnf(projectDir: string, homeDir: string): MyCnfResult {
       filePaths,
       mtimes,
       contentHashes,
-      includeDirs,
+      dirListings,
       missingPaths,
       result: cached.result,
     });
@@ -296,7 +367,7 @@ export function loadMyCnf(projectDir: string, homeDir: string): MyCnfResult {
     filePaths,
     mtimes,
     contentHashes,
-    includeDirs,
+    dirListings,
     missingPaths,
     result,
   });
