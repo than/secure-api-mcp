@@ -10,7 +10,7 @@ const { auditLog } = await import("../security/audit.js");
 const { validateUrl } = await import("../security/url-validator.js");
 const { loadEnv } = await import("../env-loader.js");
 const { validateProjectDir } = await import("../security/path-validator.js");
-const { apiCall } = await import("./api-call.js");
+const { apiCall, ApiCallSchema } = await import("./api-call.js");
 
 const mockAuditLog = vi.mocked(auditLog);
 const mockValidateUrl = vi.mocked(validateUrl);
@@ -245,5 +245,23 @@ describe("apiCall - destination allowlist", () => {
     // ...and the template is left untouched (no stringified function leaked in).
     const sentHeaders = mockFetch.mock.calls[0][1].headers;
     expect(sentHeaders["X-Test"]).toBe("{{constructor}}");
+  });
+});
+
+describe("ApiCallSchema - timeout_ms bounds", () => {
+  const base = { project_dir: "/fake/project", url: "https://example.com" };
+
+  it("defaults to 30000 when omitted", () => {
+    expect(ApiCallSchema.parse(base).timeout_ms).toBe(30000);
+  });
+
+  it("rejects zero, negative, and non-integer timeouts", () => {
+    for (const timeout_ms of [0, -1, 1.5]) {
+      expect(ApiCallSchema.safeParse({ ...base, timeout_ms }).success).toBe(false);
+    }
+  });
+
+  it("accepts a positive integer timeout", () => {
+    expect(ApiCallSchema.safeParse({ ...base, timeout_ms: 5000 }).success).toBe(true);
   });
 });
