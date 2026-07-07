@@ -91,3 +91,56 @@ describe("syncExample - normal operation", () => {
     expect(example).toContain("PORT=3000");
   });
 });
+
+describe("syncExample - smart placeholder key-name matching", () => {
+  it("does not leak numeric secrets whose key name merely contains 'port' as a substring", async () => {
+    const project = tempProject();
+    writeFileSync(
+      join(project, ".env"),
+      [
+        "PORTAL_ACCESS_TOKEN=48213793029",
+        "IMPORT_LICENSE_KEY=90210773",
+        "SUPPORT_API_PIN=1234",
+        "TRANSPORT_AUTH_CODE=5678",
+        "EXPORT_ACCESS_CODE=1111",
+        "REPORT_SECRET_TOKEN=2222",
+      ].join("\n") + "\n"
+    );
+
+    const result = await syncExample({ project_dir: project });
+
+    expect(result).toMatchObject({ keys_synced: 6 });
+    const example = readFileSync(join(project, ".env.example"), "utf-8");
+    for (const leaked of ["48213793029", "90210773", "1234", "5678", "1111", "2222"]) {
+      expect(example).not.toContain(leaked);
+    }
+  });
+
+  it("does not leak numeric secrets via the SAFE_NUMERIC_KEYS unbounded prefix match", async () => {
+    const project = tempProject();
+    writeFileSync(join(project, ".env"), "SIZEABLE_TOKEN=99887766\n");
+
+    await syncExample({ project_dir: project });
+
+    const example = readFileSync(join(project, ".env.example"), "utf-8");
+    expect(example).not.toContain("99887766");
+  });
+
+  it("still preserves genuinely port-shaped and safe-numeric keys", async () => {
+    const project = tempProject();
+    writeFileSync(
+      join(project, ".env"),
+      "PORT=3000\nDB_PORT=5432\nAPI_PORT_NUMBER=8080\nMAX_RETRIES=3\nTIMEOUT_MS=5000\n"
+    );
+
+    const result = await syncExample({ project_dir: project });
+
+    expect(result).toMatchObject({ keys_synced: 5 });
+    const example = readFileSync(join(project, ".env.example"), "utf-8");
+    expect(example).toContain("PORT=3000");
+    expect(example).toContain("DB_PORT=5432");
+    expect(example).toContain("API_PORT_NUMBER=8080");
+    expect(example).toContain("MAX_RETRIES=3");
+    expect(example).toContain("TIMEOUT_MS=5000");
+  });
+});

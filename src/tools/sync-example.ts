@@ -12,9 +12,11 @@ export const SyncExampleSchema = z.object({
     .describe("Absolute path to the project directory"),
 });
 
-// Keys where numeric values are safe to preserve (non-sensitive config)
+// Keys where numeric values are safe to preserve (non-sensitive config).
+// Each alternative must end at a `_` or end-of-string boundary so e.g.
+// PORTAL_ACCESS_TOKEN or SIZEABLE_TOKEN don't match on the PORT/SIZE prefix.
 const SAFE_NUMERIC_KEYS =
-  /^(PORT|TIMEOUT|RETRIES|MAX_|MIN_|SIZE|LIMIT|WORKERS|THREADS|POOL|BATCH|INTERVAL|DELAY|TTL|DURATION|CONCURRENCY|BACKOFF)/i;
+  /^(?:PORT|TIMEOUT|RETRIES|MAX|MIN|SIZE|LIMIT|WORKERS|THREADS|POOL|BATCH|INTERVAL|DELAY|TTL|DURATION|CONCURRENCY|BACKOFF)(?:_|$)/i;
 
 function smartPlaceholder(key: string, value: string): string {
   // URLs keep URL shape
@@ -30,8 +32,10 @@ function smartPlaceholder(key: string, value: string): string {
   if (/^\d+$/.test(value) && SAFE_NUMERIC_KEYS.test(key)) {
     return value;
   }
-  // Port-like
-  if (key.toLowerCase().includes("port") && /^\d+$/.test(value)) return value;
+  // Port-like — match "port" as a whole underscore-delimited token, not a
+  // substring, so PORTAL_ACCESS_TOKEN / IMPORT_LICENSE_KEY / SUPPORT_API_PIN
+  // / TRANSPORT_AUTH_CODE don't have their real numeric value preserved.
+  if (/(?:^|_)port(?:_|$)/i.test(key) && /^\d+$/.test(value)) return value;
   // Empty
   if (value === "") return "";
   // Default — don't leak potentially sensitive values
