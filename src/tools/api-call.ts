@@ -29,6 +29,8 @@ export const ApiCallSchema = z.object({
     .describe("Env key to use as Bearer token"),
   timeout_ms: z
     .number()
+    .int()
+    .positive()
     .optional()
     .default(30000)
     .describe("Request timeout in milliseconds"),

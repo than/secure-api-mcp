@@ -3,6 +3,7 @@ import { loadEnv } from "../env-loader.js";
 import { loadMyCnf } from "../mycnf-loader.js";
 import { validateProjectDir } from "../security/path-validator.js";
 import { auditLog } from "../security/audit.js";
+import { RunWithEnvSchema } from "./run-with-env.js";
 
 vi.mock("../env-loader.js", () => ({ loadEnv: vi.fn() }));
 vi.mock("../mycnf-loader.js", () => ({ loadMyCnf: vi.fn() }));
@@ -97,5 +98,23 @@ describe("runWithEnv with include_mycnf", () => {
     expect(r.stdout).toContain("[REDACTED:client.password]");
     expect(r.stdout).not.toContain("envtoken999");
     expect(r.stdout).not.toContain("cnfpass888");
+  });
+});
+
+describe("RunWithEnvSchema - timeout_ms bounds", () => {
+  const base = { project_dir: "/tmp", command: "echo hi" };
+
+  it("defaults to 30000 when omitted", () => {
+    expect(RunWithEnvSchema.parse(base).timeout_ms).toBe(30000);
+  });
+
+  it("rejects zero, negative, and non-integer timeouts", () => {
+    for (const timeout_ms of [0, -1, 1.5]) {
+      expect(RunWithEnvSchema.safeParse({ ...base, timeout_ms }).success).toBe(false);
+    }
+  });
+
+  it("accepts a positive integer timeout", () => {
+    expect(RunWithEnvSchema.safeParse({ ...base, timeout_ms: 5000 }).success).toBe(true);
   });
 });

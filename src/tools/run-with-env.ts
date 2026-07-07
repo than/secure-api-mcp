@@ -20,6 +20,8 @@ export const RunWithEnvSchema = z.object({
     .describe("Specific env keys to inject (default: all)"),
   timeout_ms: z
     .number()
+    .int()
+    .positive()
     .optional()
     .default(30000)
     .describe("Command timeout in milliseconds"),
