@@ -117,13 +117,29 @@ describe("syncExample - smart placeholder key-name matching", () => {
   });
 
   it("does not leak numeric secrets via the SAFE_NUMERIC_KEYS unbounded prefix match", async () => {
+    // SIZEABLE_COUNT (not ..._TOKEN) so the deny-first gate does NOT fire — this
+    // isolates the SAFE_NUMERIC_KEYS `^SIZE(?:_|$)` boundary: an unbounded
+    // `/^SIZE/` would wrongly preserve the value and fail this test.
     const project = tempProject();
-    writeFileSync(join(project, ".env"), "SIZEABLE_TOKEN=99887766\n");
+    writeFileSync(join(project, ".env"), "SIZEABLE_COUNT=99887766\n");
 
     await syncExample({ project_dir: project });
 
     const example = readFileSync(join(project, ".env.example"), "utf-8");
     expect(example).not.toContain("99887766");
+  });
+
+  it("blanks a non-secret key whose name merely contains 'port' as a substring", async () => {
+    // SUPPORT_NUMBER has no secret token, so the deny gate stays silent — this
+    // isolates the SAFE_NUMERIC_KEYS port boundary: the old substring check
+    // (`includes('port')`) would preserve the value; the token boundary blanks it.
+    const project = tempProject();
+    writeFileSync(join(project, ".env"), "SUPPORT_NUMBER=48213793029\n");
+
+    await syncExample({ project_dir: project });
+
+    const example = readFileSync(join(project, ".env.example"), "utf-8");
+    expect(example).not.toContain("48213793029");
   });
 
   it("still preserves genuinely port-shaped and safe-numeric keys", async () => {
@@ -195,7 +211,7 @@ describe("syncExample - boolean flag key boundaries", () => {
 });
 
 describe("syncExample - heals a previously leaked .env.example", () => {
-  it("re-blanks an existing placeholder that is byte-for-byte the live secret", async () => {
+  it("re-blanks a secret key's stored placeholder equal to the live value", async () => {
     // Simulates a repo that ran the old buggy tool: the real secret is already
     // baked into .env.example. A re-sync must NOT trust it back into place.
     const project = tempProject();
@@ -212,15 +228,43 @@ describe("syncExample - heals a previously leaked .env.example", () => {
     expect(example).toContain("PORTAL_ACCESS_TOKEN=");
   });
 
-  it("keeps a curated placeholder that differs from the live value", async () => {
+  it("re-blanks a secret key's stale placeholder even when it differs from the live value (rotated secret)", async () => {
+    // The leaked example value need not equal the current .env value — the
+    // secret may have been rotated since the leak. A value-equality check would
+    // miss this; keying off the sensitive NAME catches it.
     const project = tempProject();
-    writeFileSync(join(project, ".env"), "API_KEY=realsecret123\n");
-    writeFileSync(join(project, ".env.example"), "API_KEY=your-key-here\n");
+    writeFileSync(join(project, ".env"), "API_KEY=newsecret999\n");
+    writeFileSync(join(project, ".env.example"), "API_KEY=oldsecret111\n");
 
     await syncExample({ project_dir: project });
 
     const example = readFileSync(join(project, ".env.example"), "utf-8");
-    expect(example).toContain("API_KEY=your-key-here");
-    expect(example).not.toContain("realsecret123");
+    expect(example).not.toContain("oldsecret111");
+    expect(example).not.toContain("newsecret999");
+    expect(example).toContain("API_KEY=");
+  });
+
+  it("keeps a curated placeholder on a NON-secret key", async () => {
+    const project = tempProject();
+    writeFileSync(join(project, ".env"), "LOG_LEVEL=info\n");
+    writeFileSync(join(project, ".env.example"), "LOG_LEVEL=debug\n");
+
+    await syncExample({ project_dir: project });
+
+    const example = readFileSync(join(project, ".env.example"), "utf-8");
+    expect(example).toContain("LOG_LEVEL=debug");
+  });
+
+  it("does not wipe a legitimate non-secret default that equals the live value", async () => {
+    // Regression guard: a byte-equality heal would blank APP_ENV here. Keying
+    // off the (non-secret) name keeps the documented default intact.
+    const project = tempProject();
+    writeFileSync(join(project, ".env"), "APP_ENV=production\n");
+    writeFileSync(join(project, ".env.example"), "APP_ENV=production\n");
+
+    await syncExample({ project_dir: project });
+
+    const example = readFileSync(join(project, ".env.example"), "utf-8");
+    expect(example).toContain("APP_ENV=production");
   });
 });

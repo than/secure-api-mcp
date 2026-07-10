@@ -16,8 +16,10 @@ export const SyncExampleSchema = z.object({
 // ANYWHERE in the key, force redaction regardless of any "safe" prefix. This
 // is the deny-first gate: it runs before the safe allowlists so a key like
 // POOL_PASSWORD or MIN_API_KEY (safe first token, secret later token) can't
-// slip its value through. Plurals like MAX_TOKENS / MAX_KEYS deliberately
-// don't match (TOKEN+S / KEY+S fail the trailing boundary) — those are counts.
+// slip its value through. The trailing boundary means an appended `S` does NOT
+// match, so count-style keys like MAX_TOKENS / MAX_KEYS stay preserved — while
+// words that are themselves inherently plural (SECRETS, CREDENTIALS) are listed
+// explicitly.
 const SECRET_KEY_TOKENS =
   /(?:^|_)(?:SECRET|SECRETS|TOKEN|KEY|PASSWORD|PASSWD|PWD|PASS|PIN|CODE|AUTH|CREDENTIAL|CREDENTIALS|PRIVATE|CERT|SIGNATURE|SIGNING|SALT|NONCE|SEED|APIKEY)(?:_|$)/i;
 
@@ -145,13 +147,16 @@ export async function syncExample(
     const key = trimmed.slice(0, eqIndex).trim();
     const value = trimmed.slice(eqIndex + 1).trim();
 
-    // Reuse a curated placeholder from an existing .env.example — UNLESS it is
-    // byte-for-byte the live secret. That means an earlier (buggy) run leaked
-    // the real value into the example file; trusting it would re-propagate the
-    // leak forever, so fall back to regenerating a safe placeholder instead.
+    // Reuse a curated placeholder from an existing .env.example, but NEVER for a
+    // key that names a secret. An earlier (buggy) run may have written the real
+    // value into the example file, and a stored value for a sensitive key is
+    // indistinguishable from a leaked one — so regenerate, routing it back
+    // through the deny-first gate. This heals leaks a value-equality check would
+    // miss (a rotated secret, or quoting drift between .env and .env.example).
+    // Non-sensitive keys keep their curated placeholder as before.
     const existingEntry = existing.get(key);
     const placeholder =
-      existingEntry && existingEntry.placeholder !== value
+      existingEntry && !SECRET_KEY_TOKENS.test(key)
         ? existingEntry.placeholder
         : smartPlaceholder(key, value);
 
