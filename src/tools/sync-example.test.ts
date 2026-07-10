@@ -143,4 +143,84 @@ describe("syncExample - smart placeholder key-name matching", () => {
     expect(example).toContain("MAX_RETRIES=3");
     expect(example).toContain("TIMEOUT_MS=5000");
   });
+
+  it("redacts numeric secrets whose FIRST token is safe but a later token names a secret", async () => {
+    const project = tempProject();
+    writeFileSync(
+      join(project, ".env"),
+      [
+        "POOL_PASSWORD=8377291",
+        "MIN_API_KEY=442211",
+        "BATCH_SECRET=555111",
+        "TTL_SECRET=99999",
+        "PORT_SECRET_TOKEN=13371337",
+        "LIMIT_AUTH_CODE=246810",
+      ].join("\n") + "\n"
+    );
+
+    await syncExample({ project_dir: project });
+
+    const example = readFileSync(join(project, ".env.example"), "utf-8");
+    for (const leaked of ["8377291", "442211", "555111", "99999", "13371337", "246810"]) {
+      expect(example).not.toContain(leaked);
+    }
+  });
+
+  it("preserves numeric config counts whose key ends in a plural of a secret word", async () => {
+    // MAX_TOKENS / MAX_KEYS are counts, not secrets — TOKEN+S / KEY+S must not
+    // trip the deny-first gate.
+    const project = tempProject();
+    writeFileSync(join(project, ".env"), "MAX_TOKENS=4096\nMAX_KEYS=32\n");
+
+    await syncExample({ project_dir: project });
+
+    const example = readFileSync(join(project, ".env.example"), "utf-8");
+    expect(example).toContain("MAX_TOKENS=4096");
+    expect(example).toContain("MAX_KEYS=32");
+  });
+});
+
+describe("syncExample - boolean flag key boundaries", () => {
+  it("does not preserve a flag value on a key that merely starts with a flag prefix", async () => {
+    // USER_IS_ADMIN starts with 'USE' but is not a USE_* flag.
+    const project = tempProject();
+    writeFileSync(join(project, ".env"), "USER_IS_ADMIN=true\nDEBUG=true\n");
+
+    await syncExample({ project_dir: project });
+
+    const example = readFileSync(join(project, ".env.example"), "utf-8");
+    expect(example).toContain("USER_IS_ADMIN=\n");
+    expect(example).toContain("DEBUG=true");
+  });
+});
+
+describe("syncExample - heals a previously leaked .env.example", () => {
+  it("re-blanks an existing placeholder that is byte-for-byte the live secret", async () => {
+    // Simulates a repo that ran the old buggy tool: the real secret is already
+    // baked into .env.example. A re-sync must NOT trust it back into place.
+    const project = tempProject();
+    writeFileSync(join(project, ".env"), "PORTAL_ACCESS_TOKEN=48213793029\n");
+    writeFileSync(
+      join(project, ".env.example"),
+      "PORTAL_ACCESS_TOKEN=48213793029\n"
+    );
+
+    await syncExample({ project_dir: project });
+
+    const example = readFileSync(join(project, ".env.example"), "utf-8");
+    expect(example).not.toContain("48213793029");
+    expect(example).toContain("PORTAL_ACCESS_TOKEN=");
+  });
+
+  it("keeps a curated placeholder that differs from the live value", async () => {
+    const project = tempProject();
+    writeFileSync(join(project, ".env"), "API_KEY=realsecret123\n");
+    writeFileSync(join(project, ".env.example"), "API_KEY=your-key-here\n");
+
+    await syncExample({ project_dir: project });
+
+    const example = readFileSync(join(project, ".env.example"), "utf-8");
+    expect(example).toContain("API_KEY=your-key-here");
+    expect(example).not.toContain("realsecret123");
+  });
 });

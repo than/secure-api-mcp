@@ -12,30 +12,41 @@ export const SyncExampleSchema = z.object({
     .describe("Absolute path to the project directory"),
 });
 
+// Sensitive tokens that, appearing as a whole underscore-delimited word
+// ANYWHERE in the key, force redaction regardless of any "safe" prefix. This
+// is the deny-first gate: it runs before the safe allowlists so a key like
+// POOL_PASSWORD or MIN_API_KEY (safe first token, secret later token) can't
+// slip its value through. Plurals like MAX_TOKENS / MAX_KEYS deliberately
+// don't match (TOKEN+S / KEY+S fail the trailing boundary) — those are counts.
+const SECRET_KEY_TOKENS =
+  /(?:^|_)(?:SECRET|SECRETS|TOKEN|KEY|PASSWORD|PASSWD|PWD|PASS|PIN|CODE|AUTH|CREDENTIAL|CREDENTIALS|PRIVATE|CERT|SIGNATURE|SIGNING|SALT|NONCE|SEED|APIKEY)(?:_|$)/i;
+
 // Keys where numeric values are safe to preserve (non-sensitive config).
-// Each alternative must end at a `_` or end-of-string boundary so e.g.
+// PORT may appear as any whole token (DB_PORT, API_PORT_NUMBER); the rest must
+// lead the key. Every alternative ends at a `_`/end boundary so e.g.
 // PORTAL_ACCESS_TOKEN or SIZEABLE_TOKEN don't match on the PORT/SIZE prefix.
 const SAFE_NUMERIC_KEYS =
-  /^(?:PORT|TIMEOUT|RETRIES|MAX|MIN|SIZE|LIMIT|WORKERS|THREADS|POOL|BATCH|INTERVAL|DELAY|TTL|DURATION|CONCURRENCY|BACKOFF)(?:_|$)/i;
+  /(?:(?:^|_)PORT|^(?:TIMEOUT|RETRIES|MAX|MIN|SIZE|LIMIT|WORKERS|THREADS|POOL|BATCH|INTERVAL|DELAY|TTL|DURATION|CONCURRENCY|BACKOFF))(?:_|$)/i;
+
+// Boolean flag keys whose true/false value is safe to preserve. Each token is
+// boundary-anchored so USE doesn't match USER_IS_ADMIN, IS doesn't match
+// ISLAND, etc.
+const BOOL_FLAG_KEYS =
+  /^(?:ENABLE|ENABLED|USE|IS|HAS|ALLOW|ALLOWED|DEBUG|VERBOSE|STRICT|FORCE|FORCED)(?:_|$)/i;
 
 function smartPlaceholder(key: string, value: string): string {
+  // Deny-first: any key that names a secret is never echoed, whatever its value.
+  if (SECRET_KEY_TOKENS.test(key)) return "";
   // URLs keep URL shape
   if (/^https?:\/\//.test(value)) return "https://example.com";
   // Booleans — only for clearly non-sensitive flag keys
-  if (
-    (value === "true" || value === "false") &&
-    /^(ENABLE|USE|IS_|HAS_|ALLOW|DEBUG|VERBOSE|STRICT|FORCE)/i.test(key)
-  ) {
+  if ((value === "true" || value === "false") && BOOL_FLAG_KEYS.test(key)) {
     return value;
   }
   // Pure numbers — only preserve for clearly non-sensitive keys
   if (/^\d+$/.test(value) && SAFE_NUMERIC_KEYS.test(key)) {
     return value;
   }
-  // Port-like — match "port" as a whole underscore-delimited token, not a
-  // substring, so PORTAL_ACCESS_TOKEN / IMPORT_LICENSE_KEY / SUPPORT_API_PIN
-  // / TRANSPORT_AUTH_CODE don't have their real numeric value preserved.
-  if (/(?:^|_)port(?:_|$)/i.test(key) && /^\d+$/.test(value)) return value;
   // Empty
   if (value === "") return "";
   // Default — don't leak potentially sensitive values
@@ -134,11 +145,15 @@ export async function syncExample(
     const key = trimmed.slice(0, eqIndex).trim();
     const value = trimmed.slice(eqIndex + 1).trim();
 
-    // Use existing example placeholder if it exists, otherwise generate
+    // Reuse a curated placeholder from an existing .env.example — UNLESS it is
+    // byte-for-byte the live secret. That means an earlier (buggy) run leaked
+    // the real value into the example file; trusting it would re-propagate the
+    // leak forever, so fall back to regenerating a safe placeholder instead.
     const existingEntry = existing.get(key);
-    const placeholder = existingEntry
-      ? existingEntry.placeholder
-      : smartPlaceholder(key, value);
+    const placeholder =
+      existingEntry && existingEntry.placeholder !== value
+        ? existingEntry.placeholder
+        : smartPlaceholder(key, value);
 
     // Preserve any custom comment from existing .env.example
     if (existingEntry?.comment && !outputLines.at(-1)?.trim().startsWith("#")) {
