@@ -56,6 +56,45 @@ describe("validateUrl - IPv6 loopback and private ranges", () => {
     expect((await validateUrl("http://[::1]")).allowed).toBe(false);
   });
 
+  it("blocks :: unspecified address", async () => {
+    const result = await validateUrl("http://[::]");
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toMatch(/private/i);
+  });
+
+  it("blocks ::127.0.0.1 IPv4-compatible loopback", async () => {
+    const result = await validateUrl("http://[::127.0.0.1]");
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toMatch(/private/i);
+  });
+
+  it("blocks ::192.168.1.1 IPv4-compatible private", async () => {
+    const result = await validateUrl("http://[::192.168.1.1]");
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toMatch(/private/i);
+  });
+
+  it("blocks ::169.254.169.254 IPv4-compatible cloud metadata", async () => {
+    expect((await validateUrl("http://[::169.254.169.254]")).allowed).toBe(
+      false
+    );
+  });
+
+  it("blocks ::2 single-group compat form (0.0.0.0/8)", async () => {
+    expect((await validateUrl("http://[::2]")).allowed).toBe(false);
+  });
+
+  it("allows ::8.8.8.8 IPv4-compatible public", async () => {
+    expect((await validateUrl("http://[::8.8.8.8]")).allowed).toBe(true);
+  });
+
+  it("blocks DNS result of ::127.0.0.1 (dotted-form resolve path)", async () => {
+    mockLookup.mockResolvedValue({ address: "::127.0.0.1", family: 6 });
+    const result = await validateUrl("https://evil.example.com");
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toMatch(/private IP/i);
+  });
+
   it("blocks fe80:: link-local", async () => {
     expect((await validateUrl("http://[fe80::1]")).allowed).toBe(false);
   });
