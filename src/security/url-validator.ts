@@ -46,6 +46,9 @@ function isPrivateIpv4(ip: number): boolean {
 function isPrivateIp(ip: string): boolean {
   // IPv6 loopback
   if (ip === "::1") return true;
+  // IPv6 unspecified address (::) — in6addr_any; connect() reaches a
+  // loopback-bound service on Linux, mirroring the 0.0.0.0/8 IPv4 block.
+  if (ip === "::") return true;
   // IPv6 link-local (fe80::/10 — covers fe80:: through febf::)
   if (/^fe[89ab][0-9a-f]:/i.test(ip)) return true;
   // IPv6 unique local (fc00::/7 — covers fc:: and fd::)
@@ -80,6 +83,30 @@ function isPrivateIp(ip: string): boolean {
     const low = parseInt(v4mappedHex[2], 16);
     const ipNum = (((high << 16) | low) >>> 0);
     return isPrivateIpv4(ipNum);
+  }
+  // IPv4-compatible IPv6 (deprecated ::/96) — dotted form: ::x.x.x.x
+  const v4compat = ip.match(/^::(\d+\.\d+\.\d+\.\d+)$/);
+  if (v4compat) {
+    const parsed = parseIpv4(v4compat[1]);
+    if (parsed !== null) return isPrivateIpv4(parsed);
+  }
+  // IPv4-compatible IPv6 — hex form after URL normalization: ::xxxx:xxxx
+  // e.g. URL parser converts ::127.0.0.1 → ::7f00:1
+  // (::1 loopback and ::ffff:… mapped forms are already handled above).
+  const v4compatHex = ip.match(/^::([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i);
+  if (v4compatHex) {
+    const high = parseInt(v4compatHex[1], 16);
+    const low = parseInt(v4compatHex[2], 16);
+    const ipNum = (((high << 16) | low) >>> 0);
+    if (isPrivateIpv4(ipNum)) return true;
+  }
+  // IPv4-compatible IPv6 — single-group form the parser collapses to when the
+  // top 16 bits are zero: ::N encodes 0.0.x.x (e.g. ::2 → 0.0.0.2), which is
+  // inside 0.0.0.0/8. (::1 loopback is handled above.)
+  const v4compatShort = ip.match(/^::([0-9a-f]{1,4})$/i);
+  if (v4compatShort) {
+    const ipNum = parseInt(v4compatShort[1], 16) >>> 0;
+    if (isPrivateIpv4(ipNum)) return true;
   }
   // Plain IPv4
   const parsed = parseIpv4(ip);
