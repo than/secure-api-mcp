@@ -1,5 +1,27 @@
 # Changelog
 
+## [1.1.5] - 2026-08-04
+
+### Security
+
+- Bumped `undici` 8.8 → 8.10 to clear GHSA advisories in the HTTP client used by `api_call` (cross-user information disclosure, response desync via retries, cookie attribute injection, CRLF injection via blob body `type`). Reachable path, since `undici` performs every `api_call` request.
+
+Note: remaining `ip-address`, `fast-uri`, and `@hono/node-server` advisories are transitive under the SDK's HTTP/Express transport machinery, which never executes in this stdio-only server — not reachable.
+
+## [1.1.4] - 2026-08-04
+
+### Fixed
+
+- **IPv6 SSRF bypass** — `isPrivateIp()` blocked `::1` and `::ffff:` IPv4-mapped forms but treated the unspecified address `::` and IPv4-compatible IPv6 (`::a.b.c.d`, including the single-group `::N` form) as public. On Linux, `http://[::]/` reaches loopback-bound services. Now blocked, with embedded IPv4 decoded through the existing private-range check.
+
+## [1.1.3] - 2026-07-21
+
+### Fixed
+
+- **Secret leakage via substring match** in `sync_env_example`'s port heuristic
+- Hardened `api_call` destinations, `.my.cnf` includes, and request timeouts
+- Bounded `timeout_ms` to a positive integer in `api_call` and `run_with_env`
+
 ## [1.1.2] - 2026-06-27
 
 ### Changed
