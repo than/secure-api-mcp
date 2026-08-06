@@ -265,3 +265,148 @@ describe("ApiCallSchema - timeout_ms bounds", () => {
     expect(ApiCallSchema.safeParse({ ...base, timeout_ms: 5000 }).success).toBe(true);
   });
 });
+
+describe("apiCall - redirects", () => {
+  // clearAllMocks leaves *Once queues intact, so a test that returns early
+  // would hand its unused responses to the next one.
+  beforeEach(() => {
+    mockFetch.mockReset();
+    mockValidateUrl.mockReset();
+    mockValidateUrl.mockResolvedValue({
+      allowed: true,
+      resolvedIp: "93.184.216.34",
+    });
+  });
+
+  /** Builds a fetch response; `location` makes it a redirect. */
+  const reply = (status: number, location?: string, body = "OK") => ({
+    ok: status >= 200 && status < 300,
+    status,
+    text: async () => body,
+    headers: {
+      get: (name: string) =>
+        location && name.toLowerCase() === "location" ? location : null,
+      forEach: vi.fn(),
+    },
+  });
+
+  it("never lets fetch follow redirects itself", async () => {
+    mockFetch.mockResolvedValueOnce(reply(200));
+    await apiCall({ project_dir: "/fake/project", url: "https://example.com" });
+    expect(mockFetch.mock.calls[0][1].redirect).toBe("manual");
+  });
+
+  it("revalidates each hop against the SSRF guard", async () => {
+    mockFetch
+      .mockResolvedValueOnce(reply(302, "http://169.254.169.254/latest/meta-data/"))
+      .mockResolvedValueOnce(reply(200, undefined, "CREDENTIALS"));
+    mockValidateUrl
+      .mockResolvedValueOnce({ allowed: true, resolvedIp: "93.184.216.34" })
+      .mockResolvedValueOnce({ allowed: false, reason: "private IP blocked" });
+
+    const result = await apiCall({
+      project_dir: "/fake/project",
+      url: "https://example.com",
+      auth_env_key: "MY_TOKEN",
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.body).toContain("private IP blocked");
+    expect(result.body).not.toContain("CREDENTIALS");
+    // The second request was never made.
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(mockAuditLog).toHaveBeenCalledWith("api_call", { status: "blocked" });
+  });
+
+  it("blocks a redirect that would carry a secret off the allowlist", async () => {
+    process.env.SECURE_API_ALLOWED_HOSTS = "example.com";
+    mockFetch.mockResolvedValueOnce(reply(302, "https://evil.example/collect"));
+
+    const result = await apiCall({
+      project_dir: "/fake/project",
+      url: "https://example.com",
+      auth_env_key: "MY_TOKEN",
+    });
+
+    delete process.env.SECURE_API_ALLOWED_HOSTS;
+    expect(result.status).toBe(0);
+    expect(result.body).toContain("evil.example");
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("follows an allowed redirect and pins the new host's IP", async () => {
+    mockFetch
+      .mockResolvedValueOnce(reply(302, "https://example.com/moved"))
+      .mockResolvedValueOnce(reply(200, undefined, "ARRIVED"));
+    mockValidateUrl
+      .mockResolvedValueOnce({ allowed: true, resolvedIp: "93.184.216.34" })
+      .mockResolvedValueOnce({ allowed: true, resolvedIp: "93.184.216.35" });
+
+    const result = await apiCall({
+      project_dir: "/fake/project",
+      url: "https://example.com",
+    });
+
+    expect(result.status).toBe(200);
+    expect(result.body).toBe("ARRIVED");
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(mockFetch.mock.calls[1][0]).toBe("https://example.com/moved");
+  });
+
+  it("resolves a relative Location against the current URL", async () => {
+    mockFetch
+      .mockResolvedValueOnce(reply(302, "/moved"))
+      .mockResolvedValueOnce(reply(200));
+    await apiCall({ project_dir: "/fake/project", url: "https://example.com/a/b" });
+    expect(mockFetch.mock.calls[1][0]).toBe("https://example.com/moved");
+  });
+
+  it("downgrades POST to GET and drops the body on a 303", async () => {
+    mockFetch
+      .mockResolvedValueOnce(reply(303, "https://example.com/done"))
+      .mockResolvedValueOnce(reply(200));
+    await apiCall({
+      project_dir: "/fake/project",
+      url: "https://example.com",
+      method: "POST",
+      body: "payload",
+    });
+    expect(mockFetch.mock.calls[1][1].method).toBe("GET");
+    expect(mockFetch.mock.calls[1][1].body).toBeUndefined();
+  });
+
+  it("preserves method and body across a 307", async () => {
+    mockFetch
+      .mockResolvedValueOnce(reply(307, "https://example.com/done"))
+      .mockResolvedValueOnce(reply(200));
+    await apiCall({
+      project_dir: "/fake/project",
+      url: "https://example.com",
+      method: "POST",
+      body: "payload",
+    });
+    expect(mockFetch.mock.calls[1][1].method).toBe("POST");
+    expect(mockFetch.mock.calls[1][1].body).toBe("payload");
+  });
+
+  it("stops after the redirect cap rather than looping", async () => {
+    mockFetch.mockResolvedValue(reply(302, "https://example.com/next"));
+    const result = await apiCall({
+      project_dir: "/fake/project",
+      url: "https://example.com",
+    });
+    expect(result.status).toBe(0);
+    expect(result.body).toContain("exceeded 5 redirects");
+    expect(mockFetch).toHaveBeenCalledTimes(6);
+  });
+
+  it("returns a 3xx without a Location as the final response", async () => {
+    mockFetch.mockResolvedValueOnce(reply(302, undefined, "no location"));
+    const result = await apiCall({
+      project_dir: "/fake/project",
+      url: "https://example.com",
+    });
+    expect(result.status).toBe(302);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+});

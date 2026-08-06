@@ -70,6 +70,28 @@ interface ApiCallResult {
   warnings?: string[];
 }
 
+/** Redirect hops followed before giving up. */
+const MAX_REDIRECTS = 5;
+
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+/**
+ * Applies the method and body rewrite a redirect implies.
+ *
+ * 303 always becomes GET. 301 and 302 keep the method in the spec but every
+ * real client downgrades POST to GET, and servers expect that. 307 and 308
+ * exist precisely to preserve the method, so they are left alone.
+ */
+function redirectedRequest(
+  status: number,
+  method: string,
+  body: string | undefined
+): { method: string; body: string | undefined } {
+  if (status === 307 || status === 308) return { method, body };
+  if (status === 303 || method === "POST") return { method: "GET", body: undefined };
+  return { method, body };
+}
+
 export async function apiCall(
   args: z.infer<typeof ApiCallSchema>
 ): Promise<ApiCallResult> {
@@ -109,53 +131,110 @@ export async function apiCall(
   // Enforced (SECURE_API_ALLOWED_HOSTS set): block non-matching hosts.
   // Unenforced (unset): allow but warn so an unexpected destination is visible.
   const warnings: string[] = [];
-  if (injectedKeys.size > 0) {
-    const policy = getHostPolicy();
-    const host = new URL(args.url).hostname;
+  const policy = getHostPolicy();
+  const checkDestination = (host: string): string | null => {
+    if (injectedKeys.size === 0) return null;
     if (policy.enforced) {
-      if (!policy.allows(host)) {
-        auditLog("api_call", { status: "blocked" });
-        return {
-          status: 0,
-          headers: {},
-          body: `Request blocked: host '${host}' is not in SECURE_API_ALLOWED_HOSTS — refusing to send secrets to an unapproved destination`,
-        };
-      }
-    } else {
-      // No allowlist configured — secret still goes out, but make it visible.
-      warnings.push(
-        `Secret(s) sent to '${host}'. Set SECURE_API_ALLOWED_HOSTS to restrict where secrets may be sent.`
-      );
+      return policy.allows(host)
+        ? null
+        : `host '${host}' is not in SECURE_API_ALLOWED_HOSTS — refusing to send secrets to an unapproved destination`;
     }
+    // No allowlist configured — secret still goes out, but make it visible.
+    warnings.push(
+      `Secret(s) sent to '${host}'. Set SECURE_API_ALLOWED_HOSTS to restrict where secrets may be sent.`
+    );
+    return null;
+  };
+
+  const blocked = checkDestination(new URL(args.url).hostname);
+  if (blocked) {
+    auditLog("api_call", { status: "blocked" });
+    return { status: 0, headers: {}, body: `Request blocked: ${blocked}` };
   }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), args.timeout_ms);
 
   // Pin the resolved IP at the socket layer to close the DNS rebinding
   // TOCTOU window. The URL keeps the original hostname (preserving TLS
   // SNI and cert validation), but undici's lookup callback returns the
   // IP that validateUrl already checked instead of re-resolving DNS.
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), args.timeout_ms);
-
-  const fetchOptions: Record<string, unknown> = {
-    method: args.method,
-    headers,
-    body: args.body,
-    signal: controller.signal,
-  };
-  if (urlCheck.resolvedIp) {
-    const pinnedIp = urlCheck.resolvedIp;
-    fetchOptions.dispatcher = new Agent({
-      connect: {
-        lookup: (_hostname, _options, cb) => {
-          cb(null, [{ address: pinnedIp, family: pinnedIp.includes(":") ? 6 : 4 }]);
-        },
-      },
-    });
-  }
+  const pinnedDispatcher = (ip: string | undefined): Agent | undefined =>
+    ip === undefined
+      ? undefined
+      : new Agent({
+          connect: {
+            lookup: (_hostname, _options, cb) => {
+              cb(null, [{ address: ip, family: ip.includes(":") ? 6 : 4 }]);
+            },
+          },
+        });
 
   let response: Response;
+  let currentUrl = args.url;
+  let currentIp = urlCheck.resolvedIp;
+  let method: string = args.method;
+  let body = args.body;
+
   try {
-    response = await fetch(args.url, fetchOptions);
+    // Redirects are followed by hand. Letting fetch follow them would skip
+    // both the SSRF check and the allowlist on every hop after the first, so
+    // a 302 to an internal address or an unapproved host would carry the
+    // injected secret straight there. The pinned dispatcher is per-connection
+    // and would not cover the new host either.
+    for (let hop = 0; ; hop++) {
+      const dispatcher = pinnedDispatcher(currentIp);
+      response = await fetch(currentUrl, {
+        method,
+        headers,
+        body,
+        signal: controller.signal,
+        redirect: "manual",
+        ...(dispatcher ? { dispatcher } : {}),
+      } as RequestInit);
+
+      if (!REDIRECT_STATUSES.has(response.status)) break;
+
+      const location = response.headers.get("location");
+      if (!location) break;
+
+      if (hop >= MAX_REDIRECTS) {
+        auditLog("api_call", { status: "blocked" });
+        return {
+          status: 0,
+          headers: {},
+          body: `Request blocked: exceeded ${MAX_REDIRECTS} redirects`,
+          ...(warnings.length > 0 ? { warnings } : {}),
+        };
+      }
+
+      const nextUrl = new URL(location, currentUrl).toString();
+      const nextCheck = await validateUrl(nextUrl);
+      if (!nextCheck.allowed) {
+        auditLog("api_call", { status: "blocked" });
+        return {
+          status: 0,
+          headers: {},
+          body: `Request blocked: redirect to ${nextUrl} — ${nextCheck.reason}`,
+          ...(warnings.length > 0 ? { warnings } : {}),
+        };
+      }
+
+      const nextBlocked = checkDestination(new URL(nextUrl).hostname);
+      if (nextBlocked) {
+        auditLog("api_call", { status: "blocked" });
+        return {
+          status: 0,
+          headers: {},
+          body: `Request blocked: redirect to ${nextBlocked}`,
+          ...(warnings.length > 0 ? { warnings } : {}),
+        };
+      }
+
+      ({ method, body } = redirectedRequest(response.status, method, body));
+      currentUrl = nextUrl;
+      currentIp = nextCheck.resolvedIp;
+    }
   } catch (err) {
     auditLog("api_call", { status: "error" });
     const message =
