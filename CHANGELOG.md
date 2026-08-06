@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Security
+
+- `api_call` now follows redirects itself instead of letting `fetch` do it. Every hop is re-checked against the SSRF guard and the destination allowlist, and the resolved IP is re-pinned for the new host. Previously only the first request was validated, so a `302` could send an injected secret to an internal address such as `169.254.169.254` or to a host outside `SECURE_API_ALLOWED_HOSTS`. Redirect chains are capped at 5 hops; `303` (and `POST` under `301`/`302`) downgrade to `GET` and drop the body, while `307`/`308` preserve both.
+
 ## [1.1.5] - 2026-08-04
 
 ### Security
