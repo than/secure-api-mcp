@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### Security
+
+- Lifted transitive `hono`, `@hono/node-server`, `qs`, and `fast-uri` in the lockfile to clear four advisories (one high: `fast-uri` host confusion via backslash authority introducer). All four sit under the SDK's HTTP/Express transport machinery, which never executes in this stdio-only server — not reachable, cleared for hygiene.
+
+### Changed
+
+- Updated `undici` 8.10.0 → 8.10.2 and `zod` 4.4.3 → 4.6.2.
+- Updated dev dependencies: `vitest` 4.1.10 → 5.0.0, `@types/node` 26.1.2 → 26.5.1.
+
 ## [1.1.6] - 2026-08-05
 
 ### Security
