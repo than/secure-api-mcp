@@ -1,5 +1,18 @@
 # Changelog
 
+## [Unreleased]
+
+### Security
+
+- `sync_env_example` no longer writes through a symlinked temp file. The temp path is predictable (`.env.example.tmp`), so a committed symlink there was written *through* — truncating and rewriting its target — before the rename moved the link aside. The write now uses `O_EXCL | O_NOFOLLOW`, which refuses any pre-existing entry. The comment claiming the rename closed symlink traversal was true only for `.env.example` itself.
+- `sync_env_example` no longer copies multi-line secret values into `.env.example`. The tool split `.env` on newlines and redacted per line, but dotenv supports multi-line double-quoted values, so only the first line of a PEM private key or JSON service-account blob had `KEY=` shape. Every continuation line fell through and was written verbatim into a file meant to be committed. The key set now comes from dotenv's own parser — the one `env-loader.ts` already uses — and any line it does not recognize is dropped. No attacker was required to trigger this.
+- `sync_env_example` no longer reads `.env.example` through a symlink. A committed `.env.example -> .env` had the victim's real values read as "existing placeholders" and copied back into the file. Keys that evade `SECRET_KEY_TOKENS` — `DATABASE_URL`, `REDIS_URL`, `SENTRY_DSN`, `MONGO_URI` — were harvested this way. The read now uses `O_NOFOLLOW` and refuses symlinks outright; containment would not have helped, since the dangerous case stays inside the project. A stored placeholder is also discarded now if it scans as a secret or carries URL userinfo.
+- `api_call` sanitizes the blocked-redirect message. `Location` is attacker-controlled and can reflect a request header, and this check runs before the host-allowlist check, so an enforced `SECURE_API_ALLOWED_HOSTS` did not help — a blocked `302` could return a Bearer token verbatim to the model. Every other exit path was already sanitized.
+- The SSRF guard now blocks 100.64.0.0/10 (CGNAT, RFC 6598). The range carries Alibaba Cloud's IMDS at `100.100.100.200`, which serves RAM role credentials, and every Tailscale/Headscale peer address.
+- `read_mycnf` redacts the MySQL 8.0.27+ multifactor options `password1`, `password2`, and `password3`, which were returned verbatim despite the redaction contract.
+
+Each fix carries a test that fails against the previous implementation.
+
 ## [1.1.7] - 2026-09-11
 
 ### Security

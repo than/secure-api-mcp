@@ -318,6 +318,28 @@ describe("apiCall - redirects", () => {
     expect(mockAuditLog).toHaveBeenCalledWith("api_call", { status: "blocked" });
   });
 
+  it("redacts a secret reflected back in a blocked redirect's Location", async () => {
+    // An allowed host reflects the Authorization value into its Location. The
+    // private-IP check blocks the hop before the allowlist check runs, so the
+    // block message is the channel — it must be sanitized like every other exit.
+    mockFetch.mockResolvedValueOnce(
+      reply(302, "http://127.0.0.1/callback?t=tok-secret")
+    );
+    mockValidateUrl
+      .mockResolvedValueOnce({ allowed: true, resolvedIp: "93.184.216.34" })
+      .mockResolvedValueOnce({ allowed: false, reason: "private IP blocked" });
+
+    const result = await apiCall({
+      project_dir: "/fake/project",
+      url: "https://example.com",
+      auth_env_key: "MY_TOKEN",
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.body).not.toContain("tok-secret");
+    expect(result.body).toContain("[REDACTED:MY_TOKEN]");
+  });
+
   it("blocks a redirect that would carry a secret off the allowlist", async () => {
     process.env.SECURE_API_ALLOWED_HOSTS = "example.com";
     mockFetch.mockResolvedValueOnce(reply(302, "https://evil.example/collect"));

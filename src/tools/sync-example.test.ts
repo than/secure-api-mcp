@@ -268,3 +268,96 @@ describe("syncExample - heals a previously leaked .env.example", () => {
     expect(example).toContain("APP_ENV=production");
   });
 });
+
+describe("syncExample - temp file symlink traversal", () => {
+  it("refuses to write through a pre-planted .env.example.tmp symlink", async () => {
+    const project = tempProject();
+    const external = tempProject();
+    const victim = join(external, "shell-rc");
+    writeFileSync(victim, "original content");
+    writeFileSync(join(project, ".env"), "API_KEY=secret123\n");
+    // The temp path is predictable, so it is plantable by a committed repo.
+    symlinkSync(victim, join(project, ".env.example.tmp"));
+
+    await syncExample({ project_dir: project });
+
+    // The write must not have followed the link and truncated the target.
+    expect(readFileSync(victim, "utf-8")).toBe("original content");
+  });
+
+  it("still succeeds when a plain leftover .tmp is present", async () => {
+    const project = tempProject();
+    writeFileSync(join(project, ".env"), "API_KEY=secret123\n");
+    writeFileSync(join(project, ".env.example.tmp"), "stale from a crashed run");
+
+    const result = await syncExample({ project_dir: project });
+
+    expect(result).toMatchObject({ keys_synced: 1 });
+    expect(readFileSync(join(project, ".env.example"), "utf-8")).toContain("API_KEY=");
+  });
+});
+
+describe("syncExample - multi-line values", () => {
+  it("does not copy the body of a multi-line quoted secret", async () => {
+    const project = tempProject();
+    const pem = [
+      'PRIVATE_KEY="-----BEGIN PRIVATE KEY-----',
+      "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQ",
+      "b2R5bGluZXdpdGhwYWRkaW5n==",
+      '-----END PRIVATE KEY-----"',
+      "",
+    ].join("\n");
+    writeFileSync(join(project, ".env"), pem);
+
+    await syncExample({ project_dir: project });
+    const out = readFileSync(join(project, ".env.example"), "utf-8");
+
+    expect(out).not.toContain("MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQ");
+    expect(out).not.toContain("b2R5bGluZXdpdGhwYWRkaW5n");
+    expect(out).not.toContain("-----END PRIVATE KEY-----");
+    expect(out).toContain("PRIVATE_KEY=");
+  });
+
+  it("keeps the export prefix on keys that use it", async () => {
+    const project = tempProject();
+    writeFileSync(join(project, ".env"), "export DATABASE_URL=postgres://u:p@h/db\n");
+
+    await syncExample({ project_dir: project });
+    const out = readFileSync(join(project, ".env.example"), "utf-8");
+
+    expect(out).toContain("export DATABASE_URL=");
+    expect(out).not.toContain("postgres://u:p@h/db");
+  });
+});
+
+describe("syncExample - placeholder reuse", () => {
+  it("does not harvest real values through a .env.example symlink", async () => {
+    const project = tempProject();
+    writeFileSync(
+      join(project, ".env"),
+      "DATABASE_URL=postgres://real:hunter2@db.internal/prod\n"
+    );
+    // Classic committed-template trap: the "example" points at the real file.
+    symlinkSync(join(project, ".env"), join(project, ".env.example"));
+
+    await syncExample({ project_dir: project });
+    const out = readFileSync(join(project, ".env.example"), "utf-8");
+
+    expect(out).not.toContain("hunter2");
+    expect(out).toContain("DATABASE_URL=");
+  });
+
+  it("regenerates a stored placeholder that carries URL userinfo", async () => {
+    const project = tempProject();
+    writeFileSync(join(project, ".env"), "DATABASE_URL=postgres://u:p@h/db\n");
+    writeFileSync(
+      join(project, ".env.example"),
+      "DATABASE_URL=postgres://leaked:fromlastrun@db.internal/prod\n"
+    );
+
+    await syncExample({ project_dir: project });
+    const out = readFileSync(join(project, ".env.example"), "utf-8");
+
+    expect(out).not.toContain("fromlastrun");
+  });
+});

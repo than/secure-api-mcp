@@ -4,7 +4,16 @@ import { dirname, join, resolve, sep } from "node:path";
 import { parse } from "ini";
 
 /** Fields whose values are considered secrets and fed to the sanitizer. */
-export const SECRET_FIELDS = new Set(["user", "password", "host"]);
+// password1/2/3 are MySQL 8.0.27+ multifactor auth options; without them a
+// configured `password2=` was returned verbatim despite the redaction contract.
+export const SECRET_FIELDS = new Set([
+  "user",
+  "password",
+  "password1",
+  "password2",
+  "password3",
+  "host",
+]);
 
 export interface MyCnfResult {
   /** Map of section name to field map, e.g. { client: { user: "root", ... } } */

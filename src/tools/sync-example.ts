@@ -1,9 +1,11 @@
 import { z } from "zod";
 import { isAbsolute } from "node:path";
-import { readFileSync, writeFileSync, existsSync, realpathSync, openSync, closeSync, renameSync, constants } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, realpathSync, openSync, closeSync, renameSync, unlinkSync, constants } from "node:fs";
 import { join } from "node:path";
 import { validateProjectDir } from "../security/path-validator.js";
 import { auditLog } from "../security/audit.js";
+import { scanForSecrets } from "../security/scanner.js";
+import { parse } from "dotenv";
 
 export const SyncExampleSchema = z.object({
   project_dir: z
@@ -55,13 +57,40 @@ function smartPlaceholder(key: string, value: string): string {
   return "";
 }
 
+function hasUrlUserinfo(value: string): boolean {
+  try {
+    const u = new URL(value);
+    return u.username !== "" || u.password !== "";
+  } catch {
+    return false;
+  }
+}
+
 function parseExistingExample(
   path: string
 ): Map<string, { comment?: string; placeholder: string }> {
   const map = new Map<string, { comment?: string; placeholder: string }>();
   if (!existsSync(path)) return map;
 
-  const lines = readFileSync(path, "utf-8").split("\n");
+  // Read with O_NOFOLLOW and refuse a symlink outright. A committed
+  // `.env.example -> .env` would otherwise have its "placeholders" (the
+  // victim's real values) read here and copied back into the file we write.
+  // Containment is not enough: the in-project `-> .env` case stays inside the
+  // project. No reuse is the safe degradation — placeholders regenerate.
+  let fd: number;
+  try {
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch (e: unknown) {
+    if ((e as NodeJS.ErrnoException).code === "ELOOP") return map;
+    throw e;
+  }
+  let content: string;
+  try {
+    content = readFileSync(fd, "utf-8");
+  } finally {
+    closeSync(fd);
+  }
+  const lines = content.split("\n");
   let pendingComment: string | undefined;
 
   for (const line of lines) {
@@ -125,6 +154,13 @@ export async function syncExample(
   }
 
   const existing = parseExistingExample(examplePath);
+
+  // Take the authoritative key set from the same parser the server itself uses
+  // (env-loader.ts). dotenv supports multi-line double-quoted values, so a PEM
+  // body spans lines that have no `KEY=` shape — splitting on "\n" alone would
+  // echo that key material straight into the file we write. Only lines whose
+  // key dotenv actually recognizes get emitted; anything else is dropped.
+  const validKeys = new Set(Object.keys(parse(envContent)));
   const lines = envContent.split("\n");
   const outputLines: string[] = [];
   let keysCount = 0;
@@ -139,13 +175,18 @@ export async function syncExample(
     }
 
     const eqIndex = trimmed.indexOf("=");
-    if (eqIndex <= 0) {
-      outputLines.push(line);
-      continue;
-    }
+    if (eqIndex <= 0) continue;
 
-    const key = trimmed.slice(0, eqIndex).trim();
+    const rawKey = trimmed.slice(0, eqIndex).trim();
+    // dotenv strips an `export ` prefix; mirror that so the lookup matches, and
+    // keep the prefix on the way out so the file round-trips.
+    const exportPrefix = rawKey.startsWith("export ") ? "export " : "";
+    const key = exportPrefix ? rawKey.slice(exportPrefix.length).trim() : rawKey;
     const value = trimmed.slice(eqIndex + 1).trim();
+
+    // Not a key dotenv recognized => a continuation line inside a quoted value.
+    // Drop it rather than pass it through verbatim.
+    if (!validKeys.has(key)) continue;
 
     // Reuse a curated placeholder from an existing .env.example, but NEVER for a
     // key that names a secret. An earlier (buggy) run may have written the real
@@ -155,25 +196,51 @@ export async function syncExample(
     // miss (a rotated secret, or quoting drift between .env and .env.example).
     // Non-sensitive keys keep their curated placeholder as before.
     const existingEntry = existing.get(key);
-    const placeholder =
-      existingEntry && !SECRET_KEY_TOKENS.test(key)
-        ? existingEntry.placeholder
-        : smartPlaceholder(key, value);
+    const reusable =
+      existingEntry !== undefined &&
+      !SECRET_KEY_TOKENS.test(key) &&
+      // A stored placeholder that scans as a secret, or carries URL userinfo,
+      // is a leaked value from an earlier run — regenerate instead of copying.
+      scanForSecrets(existingEntry.placeholder) === existingEntry.placeholder &&
+      !hasUrlUserinfo(existingEntry.placeholder);
+    const placeholder = reusable
+      ? existingEntry!.placeholder
+      : smartPlaceholder(key, value);
 
     // Preserve any custom comment from existing .env.example
     if (existingEntry?.comment && !outputLines.at(-1)?.trim().startsWith("#")) {
       outputLines.push(existingEntry.comment);
     }
 
-    outputLines.push(`${key}=${placeholder}`);
+    outputLines.push(`${exportPrefix}${key}=${placeholder}`);
     keysCount++;
   }
 
   // Write atomically via temp file + rename. renameSync replaces the destination
   // path itself (including symlinks) rather than following it, closing both the
   // TOCTOU window and any symlink traversal on .env.example.
+  // The temp path is predictable, so a committed `.env.example.tmp` symlink
+  // would be written *through* — truncating its target — before the rename
+  // moved the link aside. O_EXCL|O_NOFOLLOW refuses any pre-existing entry,
+  // symlink or not. A leftover .tmp from a crashed run is unlinked first;
+  // unlink removes the link itself rather than following it, and the O_EXCL
+  // create stays atomic against anything racing to recreate it.
   const tmpPath = join(args.project_dir, ".env.example.tmp");
-  writeFileSync(tmpPath, outputLines.join("\n") + "\n");
+  const tmpFlags =
+    constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW;
+  let tmpFd: number;
+  try {
+    tmpFd = openSync(tmpPath, tmpFlags, 0o600);
+  } catch (e: unknown) {
+    if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+    unlinkSync(tmpPath);
+    tmpFd = openSync(tmpPath, tmpFlags, 0o600);
+  }
+  try {
+    writeFileSync(tmpFd, outputLines.join("\n") + "\n");
+  } finally {
+    closeSync(tmpFd);
+  }
   renameSync(tmpPath, examplePath);
   auditLog("sync_env_example", { keysAccessedCount: keysCount, status: "success" });
   return { path: examplePath, keys_synced: keysCount };

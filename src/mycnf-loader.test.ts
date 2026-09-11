@@ -69,6 +69,22 @@ describe("loadMyCnf - basic parsing", () => {
     // port is NOT a secret field
     expect(result.secrets).not.toHaveProperty("client.port");
   });
+
+  it("treats MySQL 8.0.27+ multifactor passwords as secrets", async () => {
+    const { loadMyCnf } = await import("./mycnf-loader.js");
+    const dir = tempDir();
+    const home = tempDir();
+    writeFileSync(
+      join(home, ".my.cnf"),
+      "[client]\nuser=root\npassword1=first\npassword2=second\npassword3=third\n"
+    );
+    const result = loadMyCnf(dir, home);
+    expect(result.secrets).toMatchObject({
+      "client.password1": "first",
+      "client.password2": "second",
+      "client.password3": "third",
+    });
+  });
 });
 
 describe("loadMyCnf - multiple sections", () => {

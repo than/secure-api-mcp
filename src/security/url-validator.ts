@@ -35,6 +35,10 @@ function isPrivateIpv4(ip: number): boolean {
   if ((ip >>> 16) === (169 << 8 | 254)) return true;
   // 0.0.0.0/8 — current network
   if ((ip >>> 24) === 0) return true;
+  // 100.64.0.0/10 — CGNAT (RFC 6598). Not "public" in any useful sense: it
+  // carries Alibaba Cloud's IMDS at 100.100.100.200, which serves RAM role
+  // credentials, and every Tailscale/Headscale peer address.
+  if ((ip >>> 22) === 401) return true;
   return false;
 }
 

@@ -215,7 +215,10 @@ export async function apiCall(
         return {
           status: 0,
           headers: {},
-          body: `Request blocked: redirect to ${nextUrl} — ${nextCheck.reason}`,
+          // nextUrl comes from the remote Location header and can carry a
+          // reflected request header; nextCheck.reason interpolates the
+          // hostname. Both reach the model, so sanitize like every other exit.
+          body: sanitize(`Request blocked: redirect to ${nextUrl} — ${nextCheck.reason}`, env),
           ...(warnings.length > 0 ? { warnings } : {}),
         };
       }
@@ -226,7 +229,7 @@ export async function apiCall(
         return {
           status: 0,
           headers: {},
-          body: `Request blocked: redirect to ${nextBlocked}`,
+          body: sanitize(`Request blocked: redirect to ${nextBlocked}`, env),
           ...(warnings.length > 0 ? { warnings } : {}),
         };
       }
