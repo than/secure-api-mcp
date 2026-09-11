@@ -140,8 +140,14 @@ export async function apiCall(
         : `host '${host}' is not in SECURE_API_ALLOWED_HOSTS — refusing to send secrets to an unapproved destination`;
     }
     // No allowlist configured — secret still goes out, but make it visible.
+    // Sanitize at the push site, not at each exit: warnings ride along on
+    // every return, and a new exit that forgets the wrapper is exactly the
+    // failure mode this change exists to prevent.
     warnings.push(
-      `Secret(s) sent to '${host}'. Set SECURE_API_ALLOWED_HOSTS to restrict where secrets may be sent.`
+      sanitize(
+        `Secret(s) sent to '${host}'. Set SECURE_API_ALLOWED_HOSTS to restrict where secrets may be sent.`,
+        env
+      )
     );
     return null;
   };
@@ -149,7 +155,7 @@ export async function apiCall(
   const blocked = checkDestination(new URL(args.url).hostname);
   if (blocked) {
     auditLog("api_call", { status: "blocked" });
-    return { status: 0, headers: {}, body: `Request blocked: ${blocked}` };
+    return { status: 0, headers: {}, body: sanitize(`Request blocked: ${blocked}`, env) };
   }
 
   const controller = new AbortController();
@@ -204,7 +210,7 @@ export async function apiCall(
           status: 0,
           headers: {},
           body: `Request blocked: exceeded ${MAX_REDIRECTS} redirects`,
-          ...(warnings.length > 0 ? { warnings: warnings.map((w) => sanitize(w, env)) } : {}),
+          ...(warnings.length > 0 ? { warnings } : {}),
         };
       }
 
@@ -218,11 +224,11 @@ export async function apiCall(
           // nextUrl comes from the remote Location header and can carry a
           // reflected request header; nextCheck.reason interpolates the
           // hostname. Both reach the model, so sanitize like every other exit.
-          // Built from the raw Location header, not nextUrl: `new URL().toString()`
-          // ASCII-lowercases the host, and sanitize matches case-sensitively, so
-          // a token reflected into the hostname would slip past redaction.
+          // Built from the raw Location header rather than nextUrl, which has been
+          // through `new URL()` and so is normalized (host lowercased, escapes
+          // rewritten). Report what the server actually sent.
           body: sanitize(`Request blocked: redirect to ${location} — ${nextCheck.reason}`, env),
-          ...(warnings.length > 0 ? { warnings: warnings.map((w) => sanitize(w, env)) } : {}),
+          ...(warnings.length > 0 ? { warnings } : {}),
         };
       }
 
@@ -233,7 +239,7 @@ export async function apiCall(
           status: 0,
           headers: {},
           body: sanitize(`Request blocked: redirect to ${location} — ${nextBlocked}`, env),
-          ...(warnings.length > 0 ? { warnings: warnings.map((w) => sanitize(w, env)) } : {}),
+          ...(warnings.length > 0 ? { warnings } : {}),
         };
       }
 
@@ -253,7 +259,7 @@ export async function apiCall(
       status: 0,
       headers: {},
       body: sanitize(`Fetch failed: ${message}`, env),
-      ...(warnings.length > 0 ? { warnings: warnings.map((w) => sanitize(w, env)) } : {}),
+      ...(warnings.length > 0 ? { warnings } : {}),
     };
   } finally {
     clearTimeout(timer);
@@ -278,6 +284,6 @@ export async function apiCall(
     status: response.status,
     headers: responseHeaders,
     body: sanitize(bodyText, env),
-    ...(warnings.length > 0 ? { warnings: warnings.map((w) => sanitize(w, env)) } : {}),
+    ...(warnings.length > 0 ? { warnings } : {}),
   };
 }

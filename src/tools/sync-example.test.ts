@@ -396,6 +396,58 @@ describe("syncExample - multi-line values", () => {
     expect(readFileSync(join(project, ".env.example"), "utf-8")).toContain("BAR=3");
   });
 
+  it("handles a trailing comment after a quoted value", async () => {
+    const project = tempProject();
+    // dotenv documents this shape. Testing the end of the line instead of the
+    // first unescaped quote treats the value as open and eats the rest.
+    writeFileSync(
+      join(project, ".env"),
+      'API_HOST="example.com"   # the public host\nAPI_KEY=sk-live-abc\nPORT=3000\n'
+    );
+
+    const result = await syncExample({ project_dir: project });
+    const out = readFileSync(join(project, ".env.example"), "utf-8");
+
+    expect(result).toMatchObject({ keys_synced: 3 });
+    expect(out).toContain("API_HOST=");
+    expect(out).toContain("API_KEY=");
+    expect(out).toContain("PORT=");
+    expect(out).not.toContain("sk-live-abc");
+  });
+
+  it("closes a multi-line value whose final line has a trailing comment", async () => {
+    const project = tempProject();
+    writeFileSync(
+      join(project, ".env"),
+      'KEY="-----BEGIN-----\nBODYLINE\n-----END-----"  # prod\nPORT=3000\n'
+    );
+
+    const result = await syncExample({ project_dir: project });
+    const out = readFileSync(join(project, ".env.example"), "utf-8");
+
+    expect(result).toMatchObject({ keys_synced: 2 });
+    expect(out).not.toContain("BODYLINE");
+    expect(out).toContain("PORT=");
+  });
+
+  it("redacts a commented-out credential rather than copying it", async () => {
+    const project = tempProject();
+    // Parking a rotated key behind a `#` is the usual habit; .env.example is
+    // meant to be committed.
+    // Assembled at runtime: a literal here is shaped exactly like a real
+    // Stripe key and trips GitHub push protection.
+    const fakeKey = ["sk", "live", "AbCdEf0123456789AbCdEf0123456789"].join("_");
+    writeFileSync(
+      join(project, ".env"),
+      `# OLD_API_KEY=${fakeKey}\nAPP_ENV=production\n`
+    );
+
+    await syncExample({ project_dir: project });
+    const out = readFileSync(join(project, ".env.example"), "utf-8");
+
+    expect(out).not.toContain(fakeKey);
+  });
+
   it("handles an export prefix separated by a tab", async () => {
     const project = tempProject();
     // dotenv's prefix is `export\s+`, so this key is DATABASE_URL to the parser.

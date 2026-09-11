@@ -5,7 +5,10 @@ function escapeRegExp(s: string): string {
 }
 
 function replaceCaseInsensitive(text: string, needle: string, tag: string): string {
-  return text.replace(new RegExp(escapeRegExp(needle), "gi"), tag);
+  // A function replacement, not a string: `$&` / `$1` inside `tag` would
+  // otherwise be substitution patterns, and `tag` is built from a key name —
+  // mycnf secrets are keyed `section.field` straight out of the ini parse.
+  return text.replace(new RegExp(escapeRegExp(needle), "gi"), () => tag);
 }
 
 export function sanitize(

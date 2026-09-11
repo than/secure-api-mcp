@@ -35,9 +35,10 @@ export async function readMyCnf(
     if (args.section && sectionName !== args.section) continue;
     redacted[sectionName] = {};
     for (const [field, value] of Object.entries(fields)) {
-      // MySQL honours a `loose-` prefix on any option, so `loose-password=`
-      // is a live credential.
-      if (SECRET_FIELDS.has(field.replace(LOOSE_PREFIX, ""))) {
+      // Mirrors isSecretField; inlined because this module's tests automock
+      // the loader, and vi.mock replaces exported functions but not values.
+      // MySQL option names fold case and honour a loose-/loose_ prefix.
+      if (SECRET_FIELDS.has(field.toLowerCase().replace(LOOSE_PREFIX, ""))) {
         redacted[sectionName][field] = `[REDACTED:${sectionName}.${field}]`;
         keysAccessedCount++;
       } else {

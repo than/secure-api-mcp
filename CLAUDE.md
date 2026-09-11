@@ -26,11 +26,17 @@ isn't: dotenv supports multi-line double-quoted values, so a PEM body spans
 lines with no `KEY=` shape — and its value pattern spans `#` too, so a
 continuation line starting with `#` is secret material, not a comment.
 
-**Open files defensively.** Reads of `.env` and `.env.example` use
-`O_NOFOLLOW`; writes use `O_EXCL | O_NOFOLLOW`. Symlinks are in the threat
-model — repos are cloned from untrusted sources, and both the destination *and*
-any predictable temp path are plantable. Realpath containment is not a
-substitute: a `.env.example -> .env` symlink stays inside the project.
+**Open files defensively.** Symlinks are in the threat model — repos are
+cloned from untrusted sources, and both the destination *and* any predictable
+temp path are plantable. Realpath containment is not a substitute: a
+`.env.example -> .env` symlink stays inside the project.
+
+In `sync_env_example` this holds: reads of `.env` and `.env.example` use
+`O_NOFOLLOW`, the temp write uses `O_EXCL | O_NOFOLLOW`. **`loadEnv`
+(`src/env-loader.ts`) does not** — it is a plain `readFileSync`, and it is the
+read behind `api_call`, `run_with_env` and `get_env_keys`. A `.env` symlinked
+to `~/.aws/credentials` parses fine there. Known gap, not yet closed; do not
+assume the guarantee is repo-wide.
 
 **`SECRET_KEY_TOKENS` is deny-first and incomplete by nature.** It matches
 whole underscore-delimited words, so `DATABASE_URL`, `REDIS_URL`, `SENTRY_DSN`

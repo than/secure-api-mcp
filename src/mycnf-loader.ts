@@ -15,6 +15,16 @@ export const LOOSE_PREFIX = /^loose[-_]/;
  * password1/2/3 are MySQL 8.0.27+ multifactor auth options; without them a
  * configured `password2=` was returned verbatim despite the redaction contract.
  */
+/**
+ * True if `field` names a credential. Normalises case and a `loose-`/`loose_`
+ * prefix first: MySQL option names fold case, so `PASSWORD=` and
+ * `Loose-Password=` are as live as their lowercase spellings, and
+ * over-redacting is the safe direction here.
+ */
+export function isSecretField(field: string): boolean {
+  return SECRET_FIELDS.has(field.toLowerCase().replace(LOOSE_PREFIX, ""));
+}
+
 export const SECRET_FIELDS = new Set([
   "user",
   "password",
@@ -245,7 +255,7 @@ function extractSecrets(
   const secrets: Record<string, string> = {};
   for (const [section, fields] of Object.entries(sections)) {
     for (const [field, value] of Object.entries(fields)) {
-      if (SECRET_FIELDS.has(field.replace(LOOSE_PREFIX, ""))) {
+      if (isSecretField(field)) {
         secrets[`${section}.${field}`] = value;
       }
     }

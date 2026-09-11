@@ -94,6 +94,16 @@ describe("loadMyCnf - basic parsing", () => {
     });
   });
 
+  it("treats an uppercase field name as a secret", async () => {
+    const { loadMyCnf } = await import("./mycnf-loader.js");
+    const dir = tempDir();
+    const home = tempDir();
+    // MySQL option names fold case.
+    writeFileSync(join(home, ".my.cnf"), "[client]\nPASSWORD=upperSecret\n");
+    const result = loadMyCnf(dir, home);
+    expect(result.secrets).toMatchObject({ "client.PASSWORD": "upperSecret" });
+  });
+
   it("treats MySQL 8.0.27+ multifactor passwords as secrets", async () => {
     const { loadMyCnf } = await import("./mycnf-loader.js");
     const dir = tempDir();

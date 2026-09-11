@@ -21,6 +21,16 @@ describe("sanitize", () => {
     });
   });
 
+  describe("replacement-string safety", () => {
+    it("does not interpret dollar sequences in the key name", () => {
+      // mycnf secrets are keyed `section.field` straight from the ini parse,
+      // so a `$&` in a section header would rebuild the secret it redacted.
+      const result = sanitize("value is hunter2222", { "a$&b": "hunter2222" });
+      expect(result).not.toContain("hunter2222");
+      expect(result).toBe("value is [REDACTED:a$&b]");
+    });
+  });
+
   describe("verbatim secret redaction", () => {
     it("replaces secret value with [REDACTED:KEY_NAME]", () => {
       const result = sanitize("token is sk-abc123xyz", {

@@ -67,16 +67,21 @@ function smartPlaceholder(key: string, value: string): string {
 const ASSIGN = /^\s*(export\s+)?([\w.-]+)(?:\s*=\s*?|:\s+?)/;
 
 /**
- * True if `s` ends with an unescaped `q`. dotenv's double-quoted value pattern
- * is `"(?:\\"|[^"])*"`, so a `\"` is literal content and the value keeps
- * going. An even run of preceding backslashes leaves the quote unescaped.
+ * True if a quoted value closes on this line. dotenv's value pattern is
+ * `"(?:\\"|[^"])*"`, so `\"` is literal content and the close is the *first*
+ * unescaped quote — and dotenv allows trailing whitespace and a `# comment`
+ * after it. Testing the end of the line instead (the obvious reading) treats
+ * `KEY="v"  # note` as still open and swallows the rest of the file.
  */
-function endsWithUnescapedQuote(s: string, q: string): boolean {
-  const t = s.trimEnd();
-  if (!t.endsWith(q)) return false;
-  let slashes = 0;
-  for (let i = t.length - 2; i >= 0 && t[i] === "\\"; i--) slashes++;
-  return slashes % 2 === 0;
+function closesQuote(s: string, quote: string, from: number): boolean {
+  for (let i = from; i < s.length; i++) {
+    if (s[i] === "\\") {
+      i++;
+      continue;
+    }
+    if (s[i] === quote) return /^\s*(#.*)?$/.test(s.slice(i + 1));
+  }
+  return false;
 }
 
 /**
@@ -118,8 +123,11 @@ function parseExistingExample(
   try {
     fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   } catch (e: unknown) {
-    if ((e as NodeJS.ErrnoException).code === "ELOOP") return map;
-    throw e;
+    // ELOOP: a symlink, refused above. Anything else (EACCES, a directory
+    // raced into place after existsSync) also means "no placeholders to
+    // reuse" — degrade to regenerating them rather than throwing past the
+    // structured error contract every other failure here honours.
+    return map;
   }
   let content: string;
   try {
@@ -212,15 +220,17 @@ export async function syncExample(
   for (const line of lines) {
     // Inside a multi-line quoted value: drop every line until the quote closes.
     if (openQuote !== null) {
-      if (endsWithUnescapedQuote(line, openQuote)) openQuote = null;
+      if (closesQuote(line, openQuote, 0)) openQuote = null;
       continue;
     }
 
     const trimmed = line.trim();
 
-    // Preserve blank lines and comments
+    // Preserve blank lines and comments — but run comments through the scanner
+    // first. `# OLD_API_KEY=sk-live-...` is how a rotated key usually gets
+    // parked, and this file is meant to be committed.
     if (trimmed === "" || trimmed.startsWith("#")) {
-      outputLines.push(line);
+      outputLines.push(trimmed === "" ? line : scanForSecrets(line));
       continue;
     }
 
@@ -237,7 +247,8 @@ export async function syncExample(
     const quote = value[0];
     if (
       (quote === '"' || quote === "'" || quote === "`") &&
-      !(value.length > 1 && endsWithUnescapedQuote(value, quote))
+      // Scan from past the opening quote.
+      !closesQuote(value, quote, 1)
     ) {
       openQuote = quote;
     }
