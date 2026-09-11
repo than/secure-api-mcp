@@ -2,6 +2,25 @@ import { describe, it, expect } from "vitest";
 import { sanitize } from "./sanitize.js";
 
 describe("sanitize", () => {
+  describe("case-folded secret redaction", () => {
+    it("redacts a secret that reached it case-folded", () => {
+      // `new URL().toString()` ASCII-lowercases the host, so a token reflected
+      // into a hostname arrives here in a different case than .env holds.
+      const result = sanitize("redirect to http://tok-secret-value.evil.test/cb", {
+        MY_TOKEN: "Tok-SECRET-Value",
+      });
+      expect(result).not.toContain("tok-secret-value");
+      expect(result).toContain("[REDACTED:MY_TOKEN]");
+    });
+
+    it("treats a secret containing regex metacharacters literally", () => {
+      const result = sanitize("value is a.b*c+d", { KEY: "a.b*c+d" });
+      expect(result).toBe("value is [REDACTED:KEY]");
+      // The pattern must not match arbitrary text the metacharacters would.
+      expect(sanitize("value is axbyczd", { KEY: "a.b*c+d" })).toBe("value is axbyczd");
+    });
+  });
+
   describe("verbatim secret redaction", () => {
     it("replaces secret value with [REDACTED:KEY_NAME]", () => {
       const result = sanitize("token is sk-abc123xyz", {

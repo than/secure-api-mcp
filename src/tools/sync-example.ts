@@ -58,11 +58,6 @@ function smartPlaceholder(key: string, value: string): string {
 }
 
 /**
- * True if `s` ends with an unescaped `q`. dotenv's double-quoted value pattern
- * is `"(?:\\"|[^"])*"`, so a `\"` is literal content and the value keeps
- * going. An even run of preceding backslashes leaves the quote unescaped.
- */
-/**
  * dotenv's own assignment prefix. It accepts `:` as well as `=`, and any
  * whitespace after `export` — hand-computing the boundary with indexOf("=")
  * missed the colon form entirely, so a quoted multi-line value opened with `:`
@@ -71,6 +66,11 @@ function smartPlaceholder(key: string, value: string): string {
  */
 const ASSIGN = /^\s*(export\s+)?([\w.-]+)(?:\s*=\s*?|:\s+?)/;
 
+/**
+ * True if `s` ends with an unescaped `q`. dotenv's double-quoted value pattern
+ * is `"(?:\\"|[^"])*"`, so a `\"` is literal content and the value keeps
+ * going. An even run of preceding backslashes leaves the quote unescaped.
+ */
 function endsWithUnescapedQuote(s: string, q: string): boolean {
   const t = s.trimEnd();
   if (!t.endsWith(q)) return false;
@@ -79,10 +79,25 @@ function endsWithUnescapedQuote(s: string, q: string): boolean {
   return slashes % 2 === 0;
 }
 
-function hasUrlUserinfo(value: string): boolean {
+/**
+ * True if a stored placeholder is a URL carrying credentials — either userinfo
+ * (`postgres://user:pw@host`) or a credential-shaped query parameter
+ * (`...?password=x`). The query case matters because SECRET_KEY_TOKENS is
+ * deliberately incomplete: `DATABASE_URL` does not match it, so a value like
+ * `postgres://host/db?password=x` clears both the key gate and the scanner.
+ *
+ * Deliberately NOT a byte-equality check against the live value: `.env` and
+ * `.env.example` legitimately share non-secret defaults such as
+ * `APP_ENV=production`, and blanking those is a regression the suite guards.
+ */
+function hasUrlCredentials(value: string): boolean {
   try {
     const u = new URL(value);
-    return u.username !== "" || u.password !== "";
+    if (u.username !== "" || u.password !== "") return true;
+    for (const name of u.searchParams.keys()) {
+      if (SECRET_KEY_TOKENS.test(name)) return true;
+    }
+    return false;
   } catch {
     return false;
   }
@@ -192,7 +207,7 @@ export async function syncExample(
   // before the comment passthrough below ever sees it.
   let openQuote: string | null = null;
   const outputLines: string[] = [];
-  let keysCount = 0;
+  const emitted = new Set<string>();
 
   for (const line of lines) {
     // Inside a multi-line quoted value: drop every line until the quote closes.
@@ -245,7 +260,7 @@ export async function syncExample(
       // A stored placeholder that scans as a secret, or carries URL userinfo,
       // is a leaked value from an earlier run — regenerate instead of copying.
       scanForSecrets(existingEntry.placeholder) === existingEntry.placeholder &&
-      !hasUrlUserinfo(existingEntry.placeholder);
+      !hasUrlCredentials(existingEntry.placeholder);
     const placeholder = reusable
       ? existingEntry!.placeholder
       : smartPlaceholder(key, value);
@@ -256,7 +271,7 @@ export async function syncExample(
     }
 
     outputLines.push(`${exportPrefix}${key}=${placeholder}`);
-    keysCount++;
+    emitted.add(key);
   }
 
   // Write atomically via temp file + rename. renameSync replaces the destination
@@ -264,15 +279,18 @@ export async function syncExample(
   // TOCTOU window and any symlink traversal on .env.example.
   // An unterminated quote leaves openQuote set for the rest of the file, so
   // every later key is dropped — and .env.example is then renamed over the
-  // curated original having silently lost them. validKeys is ground truth;
-  // refuse rather than write a lossy file. keysCount can legitimately exceed
-  // it when .env repeats a key, hence `<` and not `!==`.
-  if (keysCount < validKeys.size) {
+  // curated original having silently lost them. validKeys is ground truth.
+  // Compare membership rather than counts: a `.env` that repeats a key emits
+  // more lines than validKeys has entries, and a count check would spend that
+  // slack covering for a key that really was dropped.
+  const missing = [...validKeys].filter((k) => !emitted.has(k));
+  if (missing.length > 0) {
     auditLog("sync_env_example", { status: "blocked" });
     return {
       error:
-        `Refusing to write .env.example: parsed ${validKeys.size} keys but emitted ` +
-        `${keysCount}. A quote in .env is probably unterminated.`,
+        `Refusing to write .env.example: ${missing.length} key(s) parsed from .env ` +
+        `were not emitted (${missing.slice(0, 3).join(", ")}). A quote in .env is ` +
+        `probably unterminated.`,
     };
   }
 
@@ -290,8 +308,17 @@ export async function syncExample(
     tmpFd = openSync(tmpPath, tmpFlags);
   } catch (e: unknown) {
     if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-    unlinkSync(tmpPath);
-    tmpFd = openSync(tmpPath, tmpFlags);
+    try {
+      // unlink removes the entry itself rather than following it; the O_EXCL
+      // create then stays atomic against anything racing to recreate it.
+      unlinkSync(tmpPath);
+      tmpFd = openSync(tmpPath, tmpFlags);
+    } catch {
+      // A directory at the path, or a re-plant between the two calls. Return
+      // the structured error every other failure here returns.
+      auditLog("sync_env_example", { status: "blocked" });
+      return { error: "Refusing to write .env.example: temp path is not writable" };
+    }
   }
   try {
     writeFileSync(tmpFd, outputLines.join("\n") + "\n");
@@ -299,6 +326,6 @@ export async function syncExample(
     closeSync(tmpFd);
   }
   renameSync(tmpPath, examplePath);
-  auditLog("sync_env_example", { keysAccessedCount: keysCount, status: "success" });
-  return { path: examplePath, keys_synced: keysCount };
+  auditLog("sync_env_example", { keysAccessedCount: emitted.size, status: "success" });
+  return { path: examplePath, keys_synced: emitted.size };
 }

@@ -383,6 +383,19 @@ describe("syncExample - multi-line values", () => {
     expect(readFileSync(join(project, ".env.example"), "utf-8")).toContain("PORT=3000");
   });
 
+  it("refuses a lossy write even when .env repeats a key", async () => {
+    const project = tempProject();
+    writeFileSync(join(project, ".env.example"), "A=1\nFOO=x\nBAR=3\n");
+    // The duplicate A would buy one unit of slack in a count-based guard,
+    // exactly covering for the dropped BAR.
+    writeFileSync(join(project, ".env"), 'A=1\nA=2\nFOO="unclosed\nBAR=3\n');
+
+    const result = await syncExample({ project_dir: project });
+
+    expect(result).toHaveProperty("error");
+    expect(readFileSync(join(project, ".env.example"), "utf-8")).toContain("BAR=3");
+  });
+
   it("handles an export prefix separated by a tab", async () => {
     const project = tempProject();
     // dotenv's prefix is `export\s+`, so this key is DATABASE_URL to the parser.
@@ -440,6 +453,22 @@ describe("syncExample - placeholder reuse", () => {
     expect(out).toContain("APP_NAME=my-app");
     expect(out).toContain("# The display name");
     expect(out).not.toContain("real-production-name");
+  });
+
+  it("regenerates a stored placeholder whose URL carries a credential query param", async () => {
+    const project = tempProject();
+    // DATABASE_URL does not match SECRET_KEY_TOKENS and there is no userinfo,
+    // so this clears both the key gate and the scanner.
+    writeFileSync(join(project, ".env"), "DATABASE_URL=postgres://h/db?password=live\n");
+    writeFileSync(
+      join(project, ".env.example"),
+      "DATABASE_URL=postgres://db.internal/prod?password=leakedFromLastRun\n"
+    );
+
+    await syncExample({ project_dir: project });
+    const out = readFileSync(join(project, ".env.example"), "utf-8");
+
+    expect(out).not.toContain("leakedFromLastRun");
   });
 
   it("regenerates a stored placeholder that carries URL userinfo", async () => {

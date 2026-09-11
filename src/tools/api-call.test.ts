@@ -364,6 +364,32 @@ describe("apiCall - redirects", () => {
     expect(result.body).toContain("[REDACTED:MY_TOKEN]");
   });
 
+  it("redacts a secret carried in the validator's own reason string", async () => {
+    // The other redirect tests stub `reason` as a constant with no hostname in
+    // it, so they cannot catch a leak through that half of the message. The
+    // real reason interpolates the URL-lowercased hostname.
+    mockLoadEnv.mockReturnValue({ MY_TOKEN: "Tok-SECRET-Value" });
+    mockFetch.mockResolvedValueOnce(
+      reply(302, "http://Tok-SECRET-Value.127.0.0.1.nip.io/cb")
+    );
+    mockValidateUrl
+      .mockResolvedValueOnce({ allowed: true, resolvedIp: "93.184.216.34" })
+      .mockResolvedValueOnce({
+        allowed: false,
+        reason:
+          "Blocked: tok-secret-value.127.0.0.1.nip.io resolves to private IP 127.0.0.1",
+      });
+
+    const result = await apiCall({
+      project_dir: "/fake/project",
+      url: "https://example.com",
+      auth_env_key: "MY_TOKEN",
+    });
+
+    expect(result.body.toLowerCase()).not.toContain("tok-secret-value");
+    expect(result.body).toContain("[REDACTED:MY_TOKEN]");
+  });
+
   it("blocks a redirect that would carry a secret off the allowlist", async () => {
     process.env.SECURE_API_ALLOWED_HOSTS = "example.com";
     mockFetch.mockResolvedValueOnce(reply(302, "https://evil.example/collect"));

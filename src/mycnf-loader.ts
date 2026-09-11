@@ -3,9 +3,6 @@ import { createHash } from "node:crypto";
 import { dirname, join, resolve, sep } from "node:path";
 import { parse } from "ini";
 
-/** Fields whose values are considered secrets and fed to the sanitizer. */
-// password1/2/3 are MySQL 8.0.27+ multifactor auth options; without them a
-// configured `password2=` was returned verbatim despite the redaction contract.
 /**
  * MySQL honours a `loose-` prefix on any option, and my_getopt accepts either
  * delimiter after it, so `loose_password=` is as live a credential as
@@ -13,6 +10,11 @@ import { parse } from "ini";
  */
 export const LOOSE_PREFIX = /^loose[-_]/;
 
+/**
+ * Fields whose values are considered secrets and fed to the sanitizer.
+ * password1/2/3 are MySQL 8.0.27+ multifactor auth options; without them a
+ * configured `password2=` was returned verbatim despite the redaction contract.
+ */
 export const SECRET_FIELDS = new Set([
   "user",
   "password",
