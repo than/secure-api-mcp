@@ -352,6 +352,37 @@ describe("syncExample - multi-line values", () => {
     expect(out).toContain("BLOB=");
   });
 
+  it("drops a #-prefixed continuation line when the assignment used a colon", async () => {
+    const project = tempProject();
+    // dotenv's LINE regex accepts `:` as well as `=`.
+    writeFileSync(
+      join(project, ".env"),
+      'FOO: "line1\n# SECRETMARKER\nline3"\n'
+    );
+
+    await syncExample({ project_dir: project });
+    const out = readFileSync(join(project, ".env.example"), "utf-8");
+
+    expect(out).not.toContain("SECRETMARKER");
+  });
+
+  it("refuses to write a lossy file when a quote is unterminated", async () => {
+    const project = tempProject();
+    writeFileSync(join(project, ".env.example"), "API_HOST=example.com\nPORT=3000\n");
+    // dotenv recovers and still parses API_HOST and PORT; the line tracker
+    // cannot, so writing would silently drop them from the curated file.
+    writeFileSync(
+      join(project, ".env"),
+      "GREETING='it's a test\nAPI_HOST=example.com\nPORT=3000\n"
+    );
+
+    const result = await syncExample({ project_dir: project });
+
+    expect(result).toHaveProperty("error");
+    // The curated original must survive untouched.
+    expect(readFileSync(join(project, ".env.example"), "utf-8")).toContain("PORT=3000");
+  });
+
   it("handles an export prefix separated by a tab", async () => {
     const project = tempProject();
     // dotenv's prefix is `export\s+`, so this key is DATABASE_URL to the parser.

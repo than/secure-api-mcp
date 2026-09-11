@@ -82,6 +82,18 @@ describe("loadMyCnf - basic parsing", () => {
     });
   });
 
+  it("treats a loose_ underscore prefixed password as a secret", async () => {
+    const { loadMyCnf } = await import("./mycnf-loader.js");
+    const dir = tempDir();
+    const home = tempDir();
+    // my_getopt accepts either delimiter after a special prefix.
+    writeFileSync(join(home, ".my.cnf"), "[client]\nloose_password=underscoreSecret\n");
+    const result = loadMyCnf(dir, home);
+    expect(result.secrets).toMatchObject({
+      "client.loose_password": "underscoreSecret",
+    });
+  });
+
   it("treats MySQL 8.0.27+ multifactor passwords as secrets", async () => {
     const { loadMyCnf } = await import("./mycnf-loader.js");
     const dir = tempDir();

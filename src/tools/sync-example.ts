@@ -62,8 +62,14 @@ function smartPlaceholder(key: string, value: string): string {
  * is `"(?:\\"|[^"])*"`, so a `\"` is literal content and the value keeps
  * going. An even run of preceding backslashes leaves the quote unescaped.
  */
-/** dotenv accepts any whitespace after `export`, not just a single space. */
-const EXPORT_PREFIX = /^export\s+/;
+/**
+ * dotenv's own assignment prefix. It accepts `:` as well as `=`, and any
+ * whitespace after `export` — hand-computing the boundary with indexOf("=")
+ * missed the colon form entirely, so a quoted multi-line value opened with `:`
+ * never reached the openQuote bookkeeping below. Per CLAUDE.md: don't
+ * hand-parse `.env`.
+ */
+const ASSIGN = /^\s*(export\s+)?([\w.-]+)(?:\s*=\s*?|:\s+?)/;
 
 function endsWithUnescapedQuote(s: string, q: string): boolean {
   const t = s.trimEnd();
@@ -115,12 +121,11 @@ function parseExistingExample(
       pendingComment = trimmed;
       continue;
     }
-    const eqIndex = trimmed.indexOf("=");
-    if (eqIndex > 0) {
-      const rawKey = trimmed.slice(0, eqIndex).trim();
-      // Key on the stripped form so `export FOO` here matches `FOO` at lookup.
-      const key = rawKey.replace(EXPORT_PREFIX, "");
-      const placeholder = trimmed.slice(eqIndex + 1).trim();
+    const assign = ASSIGN.exec(line);
+    if (assign !== null) {
+      // Key on the export-stripped form so `export FOO` matches `FOO` at lookup.
+      const key = assign[2];
+      const placeholder = line.slice(assign[0].length).trim();
       map.set(key, { comment: pendingComment, placeholder });
       pendingComment = undefined;
     } else {
@@ -204,15 +209,13 @@ export async function syncExample(
       continue;
     }
 
-    const eqIndex = trimmed.indexOf("=");
-    if (eqIndex <= 0) continue;
+    const assign = ASSIGN.exec(line);
+    if (assign === null) continue;
 
-    const rawKey = trimmed.slice(0, eqIndex).trim();
-    // dotenv strips an `export ` prefix; mirror that so the lookup matches, and
-    // keep the prefix on the way out so the file round-trips.
-    const exportPrefix = EXPORT_PREFIX.exec(rawKey)?.[0] ?? "";
-    const key = rawKey.slice(exportPrefix.length);
-    const value = trimmed.slice(eqIndex + 1).trim();
+    // Keep the export prefix on the way out so the file round-trips.
+    const exportPrefix = assign[1] ?? "";
+    const key = assign[2];
+    const value = line.slice(assign[0].length).trim();
 
     // Record an unclosed opening quote before any early exit below, so the
     // continuation lines are still swallowed.
@@ -259,6 +262,20 @@ export async function syncExample(
   // Write atomically via temp file + rename. renameSync replaces the destination
   // path itself (including symlinks) rather than following it, closing both the
   // TOCTOU window and any symlink traversal on .env.example.
+  // An unterminated quote leaves openQuote set for the rest of the file, so
+  // every later key is dropped — and .env.example is then renamed over the
+  // curated original having silently lost them. validKeys is ground truth;
+  // refuse rather than write a lossy file. keysCount can legitimately exceed
+  // it when .env repeats a key, hence `<` and not `!==`.
+  if (keysCount < validKeys.size) {
+    auditLog("sync_env_example", { status: "blocked" });
+    return {
+      error:
+        `Refusing to write .env.example: parsed ${validKeys.size} keys but emitted ` +
+        `${keysCount}. A quote in .env is probably unterminated.`,
+    };
+  }
+
   // The temp path is predictable, so a committed `.env.example.tmp` symlink
   // would be written *through* — truncating its target — before the rename
   // moved the link aside. O_EXCL|O_NOFOLLOW refuses any pre-existing entry,

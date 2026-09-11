@@ -10,6 +10,10 @@
 - `api_call` sanitizes the blocked-redirect message. `Location` is attacker-controlled and can reflect a request header, and this check runs before the host-allowlist check, so an enforced `SECURE_API_ALLOWED_HOSTS` did not help — a blocked `302` could return a Bearer token verbatim to the model. Every other exit path was already sanitized.
 - The SSRF guard now blocks 100.64.0.0/10 (CGNAT, RFC 6598). The range carries Alibaba Cloud's IMDS at `100.100.100.200`, which serves RAM role credentials, and every Tailscale/Headscale peer address.
 - `read_mycnf` redacts the MySQL 8.0.27+ multifactor options `password1`, `password2`, and `password3`, which were returned verbatim despite the redaction contract. A `loose-` prefix is stripped before the match, since MySQL honours `loose-password=` as a live credential.
+- `sync_env_example` parses assignments with dotenv's own prefix rather than `indexOf("=")`. dotenv accepts `:` as a separator too, so a `FOO: "..."` multi-line value never reached the quote tracking and its `#`-prefixed continuation lines were written verbatim — the same leak, through a different separator.
+- `sync_env_example` refuses to write when it emits fewer keys than dotenv parsed. An unterminated quote leaves the tracker open for the rest of the file, so `.env.example` was renamed over the curated original having silently lost every later key.
+- `read_mycnf` also strips a `loose_` prefix. MySQL's `my_getopt` accepts either delimiter after a special prefix, so `loose_password=` was as live and as exposed as `loose-password=`.
+- `api_call` builds its blocked-redirect message from the raw `Location` header. `new URL().toString()` ASCII-lowercases the host and `sanitize` matches case-sensitively, so a mixed-case token reflected into the hostname reached the model case-folded but otherwise intact.
 - `api_call` sanitizes `warnings` as well as `body`. Warnings ride along on every exit path, and one entry interpolates a `Location`-derived hostname, so the same reflection channel reached the model unsanitized.
 
 ### Changed

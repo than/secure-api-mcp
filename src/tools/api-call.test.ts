@@ -340,6 +340,30 @@ describe("apiCall - redirects", () => {
     expect(result.body).toContain("[REDACTED:MY_TOKEN]");
   });
 
+  it("redacts a secret reflected into the redirect hostname", async () => {
+    // new URL().toString() ASCII-lowercases the host, and sanitize matches
+    // case-sensitively — so a mixed-case token reflected into the hostname
+    // survives redaction unless the message is built from the raw header.
+    mockLoadEnv.mockReturnValue({ MY_TOKEN: "Tok-SECRET-Value" });
+    mockFetch.mockResolvedValueOnce(
+      reply(302, "http://Tok-SECRET-Value.127.0.0.1.nip.io/cb")
+    );
+    mockValidateUrl
+      .mockResolvedValueOnce({ allowed: true, resolvedIp: "93.184.216.34" })
+      .mockResolvedValueOnce({ allowed: false, reason: "private IP blocked" });
+
+    const result = await apiCall({
+      project_dir: "/fake/project",
+      url: "https://example.com",
+      auth_env_key: "MY_TOKEN",
+    });
+
+    // Neither the original casing nor the URL-lowercased form may survive.
+    expect(result.body).not.toContain("Tok-SECRET-Value");
+    expect(result.body.toLowerCase()).not.toContain("tok-secret-value");
+    expect(result.body).toContain("[REDACTED:MY_TOKEN]");
+  });
+
   it("blocks a redirect that would carry a secret off the allowlist", async () => {
     process.env.SECURE_API_ALLOWED_HOSTS = "example.com";
     mockFetch.mockResolvedValueOnce(reply(302, "https://evil.example/collect"));

@@ -6,8 +6,12 @@ import { parse } from "ini";
 /** Fields whose values are considered secrets and fed to the sanitizer. */
 // password1/2/3 are MySQL 8.0.27+ multifactor auth options; without them a
 // configured `password2=` was returned verbatim despite the redaction contract.
-/** MySQL honours a `loose-` prefix on any option; strip it before matching. */
-export const LOOSE_PREFIX = /^loose-/;
+/**
+ * MySQL honours a `loose-` prefix on any option, and my_getopt accepts either
+ * delimiter after it, so `loose_password=` is as live a credential as
+ * `loose-password=`.
+ */
+export const LOOSE_PREFIX = /^loose[-_]/;
 
 export const SECRET_FIELDS = new Set([
   "user",
