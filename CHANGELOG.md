@@ -4,12 +4,15 @@
 
 ### Security
 
-- Lifted transitive `hono`, `@hono/node-server`, `qs`, and `fast-uri` in the lockfile to clear four advisories (one high: `fast-uri` host confusion via backslash authority introducer). All four sit under the SDK's HTTP/Express transport machinery, which never executes in this stdio-only server — not reachable, cleared for hygiene.
+- Lifted transitive `hono`, `@hono/node-server`, `qs`, and `fast-uri` in the lockfile to clear four advisories. Three are unreachable because this is a stdio-only server that never instantiates the HTTP transport: `hono` (`toSSG()` path escape), `@hono/node-server` (`serve-static` traversal via `%5C`), and `qs` (array-limit bypass, reached via `express`).
+- The high-severity one, `fast-uri` (host confusion via backslash authority introducer), is **not** a transport dependency — it sits under `ajv`, which the SDK uses for JSON Schema validation on a code path that is live in stdio mode. It is unreachable for a narrower reason: no schema in this server declares `format: "uri"`, and no tool declares an `outputSchema`, so ajv never invokes the format validator that calls `fast-uri`. `api_call`'s `url: z.url()` is zod's own parser, not `fast-uri`. Re-check this specific reasoning on the next `ajv` advisory rather than reusing the transport argument.
 
 ### Changed
 
 - Updated `undici` 8.10.0 → 8.10.2 and `zod` 4.4.3 → 4.6.2.
 - Updated dev dependencies: `vitest` 4.1.10 → 5.0.0, `@types/node` 26.1.2 → 26.5.1.
+- `@hono/node-server` resolved to 2.1.1, a major bump, inside the range the SDK already declares (`^1.19.9 || ^2.0.5`). No `overrides` were used.
+- Declared `engines: { node: ">=20" }`. `@hono/node-server` 2.x raises the floor from 18.14.1 to 20 and installs for every consumer, so the package now states what it supports instead of leaving consumers to hit `EBADENGINE`.
 
 ## [1.1.6] - 2026-08-05
 
