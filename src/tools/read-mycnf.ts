@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { isAbsolute } from "node:path";
 import { homedir } from "node:os";
-import { loadMyCnf, SECRET_FIELDS } from "../mycnf-loader.js";
+import { loadMyCnf, SECRET_FIELDS, LOOSE_PREFIX } from "../mycnf-loader.js";
 import { validateProjectDir } from "../security/path-validator.js";
 import { auditLog } from "../security/audit.js";
 
@@ -35,7 +35,9 @@ export async function readMyCnf(
     if (args.section && sectionName !== args.section) continue;
     redacted[sectionName] = {};
     for (const [field, value] of Object.entries(fields)) {
-      if (SECRET_FIELDS.has(field)) {
+      // MySQL honours a `loose-` prefix on any option, so `loose-password=`
+      // is a live credential.
+      if (SECRET_FIELDS.has(field.replace(LOOSE_PREFIX, ""))) {
         redacted[sectionName][field] = `[REDACTED:${sectionName}.${field}]`;
         keysAccessedCount++;
       } else {

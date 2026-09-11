@@ -6,6 +6,9 @@ import { parse } from "ini";
 /** Fields whose values are considered secrets and fed to the sanitizer. */
 // password1/2/3 are MySQL 8.0.27+ multifactor auth options; without them a
 // configured `password2=` was returned verbatim despite the redaction contract.
+/** MySQL honours a `loose-` prefix on any option; strip it before matching. */
+export const LOOSE_PREFIX = /^loose-/;
+
 export const SECRET_FIELDS = new Set([
   "user",
   "password",
@@ -236,7 +239,7 @@ function extractSecrets(
   const secrets: Record<string, string> = {};
   for (const [section, fields] of Object.entries(sections)) {
     for (const [field, value] of Object.entries(fields)) {
-      if (SECRET_FIELDS.has(field)) {
+      if (SECRET_FIELDS.has(field.replace(LOOSE_PREFIX, ""))) {
         secrets[`${section}.${field}`] = value;
       }
     }

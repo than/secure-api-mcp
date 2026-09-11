@@ -335,6 +335,35 @@ describe("syncExample - multi-line values", () => {
     expect(out).toContain("BLOB=");
   });
 
+  it("keeps tracking a quoted value past an escaped quote", async () => {
+    const project = tempProject();
+    // dotenv treats `\"` as literal content and keeps scanning, so the value
+    // is still open here. A naive endsWith would close it and let the next
+    // line reach the comment passthrough.
+    writeFileSync(
+      join(project, ".env"),
+      'BLOB="a\\"\n# SECRETMARKER\nmore"\n'
+    );
+
+    await syncExample({ project_dir: project });
+    const out = readFileSync(join(project, ".env.example"), "utf-8");
+
+    expect(out).not.toContain("SECRETMARKER");
+    expect(out).toContain("BLOB=");
+  });
+
+  it("handles an export prefix separated by a tab", async () => {
+    const project = tempProject();
+    // dotenv's prefix is `export\s+`, so this key is DATABASE_URL to the parser.
+    writeFileSync(project + "/.env", "export\tDATABASE_URL=postgres://u:p@h/db\n");
+
+    await syncExample({ project_dir: project });
+    const out = readFileSync(join(project, ".env.example"), "utf-8");
+
+    expect(out).toContain("DATABASE_URL=");
+    expect(out).not.toContain("postgres://u:p@h/db");
+  });
+
   it("keeps the export prefix on keys that use it", async () => {
     const project = tempProject();
     writeFileSync(join(project, ".env"), "export DATABASE_URL=postgres://u:p@h/db\n");

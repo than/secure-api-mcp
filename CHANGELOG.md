@@ -9,7 +9,12 @@
 - `sync_env_example` no longer reads `.env.example` through a symlink. A committed `.env.example -> .env` had the victim's real values read as "existing placeholders" and copied back into the file. Keys that evade `SECRET_KEY_TOKENS` — `DATABASE_URL`, `REDIS_URL`, `SENTRY_DSN`, `MONGO_URI` — were harvested this way. The read now uses `O_NOFOLLOW` and refuses symlinks outright; containment would not have helped, since the dangerous case stays inside the project. A stored placeholder is also discarded now if it scans as a secret or carries URL userinfo.
 - `api_call` sanitizes the blocked-redirect message. `Location` is attacker-controlled and can reflect a request header, and this check runs before the host-allowlist check, so an enforced `SECURE_API_ALLOWED_HOSTS` did not help — a blocked `302` could return a Bearer token verbatim to the model. Every other exit path was already sanitized.
 - The SSRF guard now blocks 100.64.0.0/10 (CGNAT, RFC 6598). The range carries Alibaba Cloud's IMDS at `100.100.100.200`, which serves RAM role credentials, and every Tailscale/Headscale peer address.
-- `read_mycnf` redacts the MySQL 8.0.27+ multifactor options `password1`, `password2`, and `password3`, which were returned verbatim despite the redaction contract.
+- `read_mycnf` redacts the MySQL 8.0.27+ multifactor options `password1`, `password2`, and `password3`, which were returned verbatim despite the redaction contract. A `loose-` prefix is stripped before the match, since MySQL honours `loose-password=` as a live credential.
+- `api_call` sanitizes `warnings` as well as `body`. Warnings ride along on every exit path, and one entry interpolates a `Location`-derived hostname, so the same reflection channel reached the model unsanitized.
+
+### Changed
+
+- `api_call` now refuses 100.64.0.0/10. Callers reaching an internal API over Tailscale or another CGNAT-addressed network lose `api_call` for that host, and `SECURE_API_ALLOWED_HOSTS` only narrows the allowed set — it cannot re-permit a blocked range. The Alibaba IMDS exposure outweighs the loss, but this is a behavior change, not purely a fix.
 
 Each fix carries a test that fails against the previous implementation.
 

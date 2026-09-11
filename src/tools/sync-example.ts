@@ -57,6 +57,22 @@ function smartPlaceholder(key: string, value: string): string {
   return "";
 }
 
+/**
+ * True if `s` ends with an unescaped `q`. dotenv's double-quoted value pattern
+ * is `"(?:\\"|[^"])*"`, so a `\"` is literal content and the value keeps
+ * going. An even run of preceding backslashes leaves the quote unescaped.
+ */
+/** dotenv accepts any whitespace after `export`, not just a single space. */
+const EXPORT_PREFIX = /^export\s+/;
+
+function endsWithUnescapedQuote(s: string, q: string): boolean {
+  const t = s.trimEnd();
+  if (!t.endsWith(q)) return false;
+  let slashes = 0;
+  for (let i = t.length - 2; i >= 0 && t[i] === "\\"; i--) slashes++;
+  return slashes % 2 === 0;
+}
+
 function hasUrlUserinfo(value: string): boolean {
   try {
     const u = new URL(value);
@@ -103,9 +119,7 @@ function parseExistingExample(
     if (eqIndex > 0) {
       const rawKey = trimmed.slice(0, eqIndex).trim();
       // Key on the stripped form so `export FOO` here matches `FOO` at lookup.
-      const key = rawKey.startsWith("export ")
-        ? rawKey.slice("export ".length).trim()
-        : rawKey;
+      const key = rawKey.replace(EXPORT_PREFIX, "");
       const placeholder = trimmed.slice(eqIndex + 1).trim();
       map.set(key, { comment: pendingComment, placeholder });
       pendingComment = undefined;
@@ -178,7 +192,7 @@ export async function syncExample(
   for (const line of lines) {
     // Inside a multi-line quoted value: drop every line until the quote closes.
     if (openQuote !== null) {
-      if (line.trimEnd().endsWith(openQuote)) openQuote = null;
+      if (endsWithUnescapedQuote(line, openQuote)) openQuote = null;
       continue;
     }
 
@@ -196,8 +210,8 @@ export async function syncExample(
     const rawKey = trimmed.slice(0, eqIndex).trim();
     // dotenv strips an `export ` prefix; mirror that so the lookup matches, and
     // keep the prefix on the way out so the file round-trips.
-    const exportPrefix = rawKey.startsWith("export ") ? "export " : "";
-    const key = exportPrefix ? rawKey.slice(exportPrefix.length).trim() : rawKey;
+    const exportPrefix = EXPORT_PREFIX.exec(rawKey)?.[0] ?? "";
+    const key = rawKey.slice(exportPrefix.length);
     const value = trimmed.slice(eqIndex + 1).trim();
 
     // Record an unclosed opening quote before any early exit below, so the
@@ -205,7 +219,7 @@ export async function syncExample(
     const quote = value[0];
     if (
       (quote === '"' || quote === "'" || quote === "`") &&
-      !(value.length > 1 && value.endsWith(quote))
+      !(value.length > 1 && endsWithUnescapedQuote(value, quote))
     ) {
       openQuote = quote;
     }

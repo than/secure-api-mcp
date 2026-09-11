@@ -204,7 +204,7 @@ export async function apiCall(
           status: 0,
           headers: {},
           body: `Request blocked: exceeded ${MAX_REDIRECTS} redirects`,
-          ...(warnings.length > 0 ? { warnings } : {}),
+          ...(warnings.length > 0 ? { warnings: warnings.map((w) => sanitize(w, env)) } : {}),
         };
       }
 
@@ -219,7 +219,7 @@ export async function apiCall(
           // reflected request header; nextCheck.reason interpolates the
           // hostname. Both reach the model, so sanitize like every other exit.
           body: sanitize(`Request blocked: redirect to ${nextUrl} — ${nextCheck.reason}`, env),
-          ...(warnings.length > 0 ? { warnings } : {}),
+          ...(warnings.length > 0 ? { warnings: warnings.map((w) => sanitize(w, env)) } : {}),
         };
       }
 
@@ -230,7 +230,7 @@ export async function apiCall(
           status: 0,
           headers: {},
           body: sanitize(`Request blocked: redirect to ${nextBlocked}`, env),
-          ...(warnings.length > 0 ? { warnings } : {}),
+          ...(warnings.length > 0 ? { warnings: warnings.map((w) => sanitize(w, env)) } : {}),
         };
       }
 
@@ -250,7 +250,7 @@ export async function apiCall(
       status: 0,
       headers: {},
       body: sanitize(`Fetch failed: ${message}`, env),
-      ...(warnings.length > 0 ? { warnings } : {}),
+      ...(warnings.length > 0 ? { warnings: warnings.map((w) => sanitize(w, env)) } : {}),
     };
   } finally {
     clearTimeout(timer);
@@ -275,6 +275,6 @@ export async function apiCall(
     status: response.status,
     headers: responseHeaders,
     body: sanitize(bodyText, env),
-    ...(warnings.length > 0 ? { warnings } : {}),
+    ...(warnings.length > 0 ? { warnings: warnings.map((w) => sanitize(w, env)) } : {}),
   };
 }

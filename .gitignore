@@ -2,3 +2,5 @@ node_modules/
 dist/
 .env
 .worktrees/
+.claude/settings.local.json
+.sidecar/
