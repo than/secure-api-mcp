@@ -67,11 +67,16 @@ function smartPlaceholder(key: string, value: string): string {
 const ASSIGN = /^\s*(export\s+)?([\w.-]+)(?:\s*=\s*?|:\s+?)/;
 
 /**
- * True if a quoted value closes on this line. dotenv's value pattern is
- * `"(?:\\"|[^"])*"`, so `\"` is literal content and the close is the *first*
- * unescaped quote — and dotenv allows trailing whitespace and a `# comment`
- * after it. Testing the end of the line instead (the obvious reading) treats
- * `KEY="v"  # note` as still open and swallows the rest of the file.
+ * True if a quoted value closes on this line. dotenv's quoted alternative is
+ * `"(?:\\"|[^"])*"`; `[^"]` cannot cross an unescaped quote, so that
+ * alternative always ends at the first one and can never backtrack past it.
+ * Any unescaped quote therefore ends the value — whatever follows it.
+ *
+ * Two readings fail here. Testing the end of the *line* treats the documented
+ * `KEY="v"  # note` as still open. Requiring a clean `\s*(#.*)?` tail instead
+ * treats `JSON_CONFIG="{"a":1}"` as open, swallows the rest of the file, and
+ * then blames an unterminated quote that does not exist — dotenv parses that
+ * line by falling through to its unquoted branch, which cannot span newlines.
  */
 function closesQuote(s: string, quote: string, from: number): boolean {
   for (let i = from; i < s.length; i++) {
@@ -79,7 +84,7 @@ function closesQuote(s: string, quote: string, from: number): boolean {
       i++;
       continue;
     }
-    if (s[i] === quote) return /^\s*(#.*)?$/.test(s.slice(i + 1));
+    if (s[i] === quote) return true;
   }
   return false;
 }
@@ -278,7 +283,11 @@ export async function syncExample(
 
     // Preserve any custom comment from existing .env.example
     if (existingEntry?.comment && !outputLines.at(-1)?.trim().startsWith("#")) {
-      outputLines.push(existingEntry.comment);
+      // Scan this too. A `.env.example` written by an earlier, leakier run can
+      // already hold `# OLD_API_KEY=sk_live_...`; parseExistingExample picks it
+      // up as pendingComment and it would be re-emitted verbatim even when the
+      // value beside it is being regenerated.
+      outputLines.push(scanForSecrets(existingEntry.comment));
     }
 
     outputLines.push(`${exportPrefix}${key}=${placeholder}`);

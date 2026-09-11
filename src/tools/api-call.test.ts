@@ -390,6 +390,29 @@ describe("apiCall - redirects", () => {
     expect(result.body).toContain("[REDACTED:MY_TOKEN]");
   });
 
+  it("redacts a secret reflected into a response header name", async () => {
+    mockLoadEnv.mockReturnValue({ MY_TOKEN: "tok-secret-value" });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      text: async () => "OK",
+      headers: {
+        // HTTP token chars cover most secret alphabets, so a name is a channel.
+        forEach: (fn: (v: string, k: string) => void) =>
+          fn("1", "x-echo-tok-secret-value"),
+        get: () => null,
+      },
+    });
+
+    const result = await apiCall({
+      project_dir: "/fake/project",
+      url: "https://example.com",
+      auth_env_key: "MY_TOKEN",
+    });
+
+    expect(Object.keys(result.headers).join()).not.toContain("tok-secret-value");
+  });
+
   it("blocks a redirect that would carry a secret off the allowlist", async () => {
     process.env.SECURE_API_ALLOWED_HOSTS = "example.com";
     mockFetch.mockResolvedValueOnce(reply(302, "https://evil.example/collect"));

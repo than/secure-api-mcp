@@ -20,7 +20,9 @@
 - `api_call` sanitizes `warnings` at the point they are built rather than at each exit, and sanitizes the first-hop allowlist refusal, which was the one return in the file without it.
 - `sanitize` builds its replacement through a function, so a `$&` or `$1` in a key name cannot rebuild the value it just redacted. `read_mycnf` keys secrets `section.field` straight from the ini parse, so key names are not fully controlled.
 - `read_mycnf` folds case before matching, since MySQL option names are case-insensitive and `PASSWORD=` was returned verbatim.
-- `sync_env_example` runs preserved comment lines through the secret scanner. A commented-out credential — the usual way a rotated key gets parked — was copied into a file meant to be committed.
+- `sync_env_example` runs preserved comment lines through the secret scanner — both those read from `.env` and those carried over from an existing `.env.example`, since a file written by an earlier run can already hold a parked credential.
+- `api_call` sanitizes response header *names* as well as values. HTTP token characters cover most secret alphabets, so a server can reflect a request header into a response header name.
+- `read_mycnf` reuses the loader's `secrets` map rather than re-deriving which fields are sensitive, so one predicate decides what the model sees.
 - `api_call` sanitizes `warnings` as well as `body`. Warnings ride along on every exit path, and one entry interpolates a `Location`-derived hostname, so the same reflection channel reached the model unsanitized.
 
 ### Changed

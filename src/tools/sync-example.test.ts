@@ -369,11 +369,12 @@ describe("syncExample - multi-line values", () => {
   it("refuses to write a lossy file when a quote is unterminated", async () => {
     const project = tempProject();
     writeFileSync(join(project, ".env.example"), "API_HOST=example.com\nPORT=3000\n");
-    // dotenv recovers and still parses API_HOST and PORT; the line tracker
+    // Genuinely unterminated: no closing quote anywhere. dotenv recovers via
+    // its unquoted branch and still parses API_HOST and PORT; the line tracker
     // cannot, so writing would silently drop them from the curated file.
     writeFileSync(
       join(project, ".env"),
-      "GREETING='it's a test\nAPI_HOST=example.com\nPORT=3000\n"
+      'GREETING="still open\nAPI_HOST=example.com\nPORT=3000\n'
     );
 
     const result = await syncExample({ project_dir: project });
@@ -446,6 +447,52 @@ describe("syncExample - multi-line values", () => {
     const out = readFileSync(join(project, ".env.example"), "utf-8");
 
     expect(out).not.toContain(fakeKey);
+  });
+
+  it("keeps JSON in a quoted value from swallowing the rest of the file", async () => {
+    const project = tempProject();
+    // Every key here parses under dotenv; a clean-tail requirement would read
+    // JSON_CONFIG as open and then blame a quote that is not unterminated.
+    writeFileSync(
+      join(project, ".env"),
+      'API_HOST="example.com"\nJSON_CONFIG="{"a":1}"\nPORT=3000\n'
+    );
+
+    const result = await syncExample({ project_dir: project });
+    const out = readFileSync(join(project, ".env.example"), "utf-8");
+
+    expect(result).toMatchObject({ keys_synced: 3 });
+    expect(out).toContain("PORT=");
+  });
+
+  it("redacts a poisoned comment carried over from .env.example", async () => {
+    const project = tempProject();
+    const fakeKey = ["sk", "live", "AbCdEf0123456789AbCdEf0123456789"].join("_");
+    writeFileSync(join(project, ".env"), "APP_NAME=real-name\n");
+    // Left behind by an earlier, leakier run; re-emitted as a pendingComment.
+    writeFileSync(
+      join(project, ".env.example"),
+      `# see ${fakeKey}\nAPP_NAME=my-app\n`
+    );
+
+    await syncExample({ project_dir: project });
+    const out = readFileSync(join(project, ".env.example"), "utf-8");
+
+    expect(out).not.toContain(fakeKey);
+  });
+
+  it("treats an apostrophe as closing a single-quoted value, as dotenv does", async () => {
+    const project = tempProject();
+    // dotenv's `'(?:\\'|[^'])*'` closes at the apostrophe, yielding `it`, and
+    // keeps parsing the following lines as ordinary entries.
+    writeFileSync(
+      join(project, ".env"),
+      "GREETING='it's a test\nAPI_HOST=example.com\nPORT=3000\n"
+    );
+
+    const result = await syncExample({ project_dir: project });
+
+    expect(result).toMatchObject({ keys_synced: 3 });
   });
 
   it("handles an export prefix separated by a tab", async () => {

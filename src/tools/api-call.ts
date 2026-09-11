@@ -268,7 +268,10 @@ export async function apiCall(
   const bodyText = await response.text();
   const responseHeaders: Record<string, string> = {};
   response.headers.forEach((value, key) => {
-    responseHeaders[key] = sanitize(value, env);
+    // Names as well as values: HTTP token characters cover most secret
+    // alphabets, so a server can reflect a request header into a response
+    // header *name*.
+    responseHeaders[sanitize(key, env)] = sanitize(value, env);
   });
 
   // injectedKeys already holds the unique env keys whose values were actually
