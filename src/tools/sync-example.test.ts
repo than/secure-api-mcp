@@ -318,6 +318,23 @@ describe("syncExample - multi-line values", () => {
     expect(out).toContain("PRIVATE_KEY=");
   });
 
+  it("drops a #-prefixed line inside a quoted value instead of preserving it", async () => {
+    const project = tempProject();
+    // dotenv's value pattern spans newlines AND `#`, so this line is secret
+    // material, not a comment. The comment-preservation path must not see it.
+    writeFileSync(
+      join(project, ".env"),
+      'BLOB="line1\n# SECRETMARKER\nline3"\n'
+    );
+
+    await syncExample({ project_dir: project });
+    const out = readFileSync(join(project, ".env.example"), "utf-8");
+
+    expect(out).not.toContain("SECRETMARKER");
+    expect(out).not.toContain("line3");
+    expect(out).toContain("BLOB=");
+  });
+
   it("keeps the export prefix on keys that use it", async () => {
     const project = tempProject();
     writeFileSync(join(project, ".env"), "export DATABASE_URL=postgres://u:p@h/db\n");
@@ -345,6 +362,24 @@ describe("syncExample - placeholder reuse", () => {
 
     expect(out).not.toContain("hunter2");
     expect(out).toContain("DATABASE_URL=");
+  });
+
+  it("still reuses a clean curated placeholder", async () => {
+    // Guards the scanForSecrets gate: if the scanner ever normalized clean
+    // text, reuse would silently die for every key.
+    const project = tempProject();
+    writeFileSync(join(project, ".env"), "APP_NAME=real-production-name\n");
+    writeFileSync(
+      join(project, ".env.example"),
+      "# The display name\nAPP_NAME=my-app\n"
+    );
+
+    await syncExample({ project_dir: project });
+    const out = readFileSync(join(project, ".env.example"), "utf-8");
+
+    expect(out).toContain("APP_NAME=my-app");
+    expect(out).toContain("# The display name");
+    expect(out).not.toContain("real-production-name");
   });
 
   it("regenerates a stored placeholder that carries URL userinfo", async () => {

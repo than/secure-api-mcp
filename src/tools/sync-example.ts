@@ -101,7 +101,11 @@ function parseExistingExample(
     }
     const eqIndex = trimmed.indexOf("=");
     if (eqIndex > 0) {
-      const key = trimmed.slice(0, eqIndex).trim();
+      const rawKey = trimmed.slice(0, eqIndex).trim();
+      // Key on the stripped form so `export FOO` here matches `FOO` at lookup.
+      const key = rawKey.startsWith("export ")
+        ? rawKey.slice("export ".length).trim()
+        : rawKey;
       const placeholder = trimmed.slice(eqIndex + 1).trim();
       map.set(key, { comment: pendingComment, placeholder });
       pendingComment = undefined;
@@ -162,10 +166,22 @@ export async function syncExample(
   // key dotenv actually recognizes get emitted; anything else is dropped.
   const validKeys = new Set(Object.keys(parse(envContent)));
   const lines = envContent.split("\n");
+
+  // Tracks the quote character of a value still spanning lines. dotenv's value
+  // pattern matches across newlines *and* across `#`, so a continuation line
+  // beginning with `#` is secret material, not a comment — it must be dropped
+  // before the comment passthrough below ever sees it.
+  let openQuote: string | null = null;
   const outputLines: string[] = [];
   let keysCount = 0;
 
   for (const line of lines) {
+    // Inside a multi-line quoted value: drop every line until the quote closes.
+    if (openQuote !== null) {
+      if (line.trimEnd().endsWith(openQuote)) openQuote = null;
+      continue;
+    }
+
     const trimmed = line.trim();
 
     // Preserve blank lines and comments
@@ -183,6 +199,16 @@ export async function syncExample(
     const exportPrefix = rawKey.startsWith("export ") ? "export " : "";
     const key = exportPrefix ? rawKey.slice(exportPrefix.length).trim() : rawKey;
     const value = trimmed.slice(eqIndex + 1).trim();
+
+    // Record an unclosed opening quote before any early exit below, so the
+    // continuation lines are still swallowed.
+    const quote = value[0];
+    if (
+      (quote === '"' || quote === "'" || quote === "`") &&
+      !(value.length > 1 && value.endsWith(quote))
+    ) {
+      openQuote = quote;
+    }
 
     // Not a key dotenv recognized => a continuation line inside a quoted value.
     // Drop it rather than pass it through verbatim.
@@ -230,11 +256,11 @@ export async function syncExample(
     constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW;
   let tmpFd: number;
   try {
-    tmpFd = openSync(tmpPath, tmpFlags, 0o600);
+    tmpFd = openSync(tmpPath, tmpFlags);
   } catch (e: unknown) {
     if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
     unlinkSync(tmpPath);
-    tmpFd = openSync(tmpPath, tmpFlags, 0o600);
+    tmpFd = openSync(tmpPath, tmpFlags);
   }
   try {
     writeFileSync(tmpFd, outputLines.join("\n") + "\n");
