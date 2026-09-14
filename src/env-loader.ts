@@ -1,8 +1,11 @@
-import { readFileSync, statSync, openSync, closeSync, realpathSync, constants } from "node:fs";
+import { readFileSync, statSync, openSync, closeSync, realpathSync, lstatSync, constants } from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { parse } from "dotenv";
 import { auditLog } from "./security/audit.js";
+
+/** See sync-example.ts: O_NOFOLLOW is POSIX-only and coerces to 0 elsewhere. */
+const O_NOFOLLOW = constants.O_NOFOLLOW ?? 0;
 
 export interface LoadEnvResult {
   env: Record<string, string>;
@@ -44,7 +47,12 @@ export function loadEnvChecked(projectDir: string): LoadEnvResult {
   try {
     let fd: number;
     try {
-      fd = openSync(envPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+      if (O_NOFOLLOW === 0 && lstatSync(envPath, { throwIfNoEntry: false })?.isSymbolicLink()) {
+        const err = new Error("ELOOP") as NodeJS.ErrnoException;
+        err.code = "ELOOP";
+        throw err;
+      }
+      fd = openSync(envPath, constants.O_RDONLY | O_NOFOLLOW);
     } catch (e: unknown) {
       if ((e as NodeJS.ErrnoException).code !== "ELOOP") throw e;
       // A symlink — allow it only if it resolves inside the project.
@@ -62,7 +70,7 @@ export function loadEnvChecked(projectDir: string): LoadEnvResult {
       // nothing — and it rejects a re-plant in the realpath-to-open window
       // rather than following it. `.env -> ./config/local.env` is a permitted
       // layout and ./config/ is repo-controlled.
-      fd = openSync(realEnv, constants.O_RDONLY | constants.O_NOFOLLOW);
+      fd = openSync(realEnv, constants.O_RDONLY | O_NOFOLLOW);
     }
     try {
       content = readFileSync(fd, "utf-8");

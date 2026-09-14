@@ -571,6 +571,35 @@ describe("syncExample - multi-line values", () => {
     expect(out).not.toContain("8f3a9c2e1b7d40561122");
   });
 
+  it("does not redact a value from the comment beside it", async () => {
+    const project = tempProject();
+    writeFileSync(
+      join(project, ".env"),
+      "NODE_ENV=production\n# Use production credentials only on the release host\n"
+    );
+    writeFileSync(join(project, ".env.example"), "NODE_ENV=production\n");
+
+    await syncExample({ project_dir: project });
+    const out = readFileSync(join(project, ".env.example"), "utf-8");
+
+    // The file prints `production` verbatim one line up; redacting the prose
+    // would contradict it.
+    expect(out).toContain("# Use production credentials only on the release host");
+  });
+
+  it("still redacts a comment echoing a value the file does not carry", async () => {
+    const project = tempProject();
+    writeFileSync(
+      join(project, ".env"),
+      "API_SECRET=zulu-charlie-whiskey-42\n# rotate zulu-charlie-whiskey-42 quarterly\n"
+    );
+
+    await syncExample({ project_dir: project });
+    const out = readFileSync(join(project, ".env.example"), "utf-8");
+
+    expect(out).not.toContain("zulu-charlie-whiskey-42");
+  });
+
   it("keeps a punctuated shared default such as a timezone", async () => {
     const project = tempProject();
     writeFileSync(join(project, ".env"), "TZ=America/New_York\n");
@@ -767,6 +796,18 @@ describe("detectSpanDisagreement", () => {
         new Set(["BLOB"])
       )
     ).toBeNull();
+  });
+
+  it("refuses when a span closes one line early, not just wholly early", () => {
+    // The partial under-span: the scan claims two lines, dotenv's value has
+    // three newlines. The uncovered line reaches the comment path.
+    expect(
+      detectSpanDisagreement(
+        [span({ startLine: 0, endLine: 1, value: '"a' })],
+        { BLOB: "a\nb\n# c\nd" },
+        new Set(["BLOB"])
+      )
+    ).toMatch(/spans lines per dotenv/);
   });
 
   it("refuses when a parsed key was never emitted", () => {

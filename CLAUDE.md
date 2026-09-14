@@ -45,6 +45,19 @@ and `MONGO_URI` do *not* match. Anything that reuses a value for a
 non-matching key must independently check `scanForSecrets` and URL userinfo.
 Widening the regex is not the fix; assume it misses.
 
+**Known residual in `sync_env_example` placeholder reuse.** A stored
+placeholder byte-identical to the live value is kept when the key dodges
+`SECRET_KEY_TOKENS`, is not opaque-token-shaped, is not a credential URL,
+matches no scanner brand, and `smartPlaceholder` has no substitute of its own.
+That is deliberate — it is what preserves `APP_ENV=production` and
+`TZ=America/New_York` — and it rests on the same assumption as the paragraph
+above: the key gate misses things. Not an oversight.
+
+**`O_NOFOLLOW` is POSIX-only.** `O_RDONLY | undefined` coerces to `0`, so the
+flag would vanish silently on Windows rather than fail. Both read paths fall
+back to an `lstat` symlink check there, which reopens the TOCTOU window the
+flag closes. `package.json` sets no `os` restriction.
+
 **Re-validate every redirect hop.** `validateUrl` runs per hop, the resolved IP
 is re-pinned for each new host, and the allowlist is re-checked. `fetch` is
 always called with `redirect: "manual"`.

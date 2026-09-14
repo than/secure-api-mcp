@@ -146,7 +146,7 @@ export async function runWithEnv(
           exit_code: exitCode,
           stdout: sanitize(stdout, sanitizeSecrets),
           stderr: sanitize(stderr, sanitizeSecrets),
-          ...(warnings.length > 0 ? { warnings } : {}),
+          ...(warnings.length > 0 ? { warnings: warnings.map((w) => sanitize(w, sanitizeSecrets)) } : {}),
         });
       }
     );

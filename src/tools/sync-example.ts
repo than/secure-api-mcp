@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { isAbsolute } from "node:path";
-import { readFileSync, writeFileSync, existsSync, realpathSync, openSync, closeSync, renameSync, unlinkSync, constants } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, realpathSync, lstatSync, openSync, closeSync, renameSync, unlinkSync, constants } from "node:fs";
 import { join } from "node:path";
 import { validateProjectDir } from "../security/path-validator.js";
 import { auditLog } from "../security/audit.js";
@@ -69,6 +69,24 @@ function smartPlaceholder(key: string, value: string): string {
  */
 const DOTENV_LINE =
   /(?:^|^)\s*(?:export\s+)?([\w.-]+)(?:\s*=\s*?|:\s+?)(\s*'(?:\\'|[^'])*'|\s*"(?:\\"|[^"])*"|\s*`(?:\\`|[^`])*`|[^#\r\n]+)?\s*(?:#.*)?(?:$|$)/gm;
+
+/**
+ * `O_NOFOLLOW` is POSIX-only, and `O_RDONLY | undefined` silently coerces to 0
+ * — so on Windows the flag would vanish rather than fail loudly and both
+ * read-side symlink controls would no-op. Fall back to an lstat check there. It
+ * reintroduces the TOCTOU window the flag closes, but a narrow window beats no
+ * control at all.
+ */
+const O_NOFOLLOW = constants.O_NOFOLLOW ?? 0;
+
+function refuseSymlink(path: string): void {
+  if (O_NOFOLLOW !== 0) return;
+  if (lstatSync(path, { throwIfNoEntry: false })?.isSymbolicLink()) {
+    const err = new Error("ELOOP") as NodeJS.ErrnoException;
+    err.code = "ELOOP";
+    throw err;
+  }
+}
 
 /** Single-line `KEY=value`, for reading this tool's own output back. */
 const SINGLE_ASSIGN = /^\s*(export\s+)?([\w.-]+)(?:\s*=\s*?|:\s+?)/;
@@ -163,7 +181,9 @@ function hasUrlCredentials(value: string): boolean {
     const u = new URL(value);
     if (u.username !== "" || u.password !== "") return true;
     for (const name of u.searchParams.keys()) {
-      if (SECRET_KEY_TOKENS.test(name)) return true;
+      // SECRET_KEY_TOKENS matches underscore-delimited words, right for env
+      // var names; query params use `-` and camelCase just as often.
+      if (SECRET_KEY_TOKENS.test(name.replace(/-/g, "_"))) return true;
     }
     return false;
   } catch {
@@ -184,7 +204,8 @@ function parseExistingExample(
   // project. No reuse is the safe degradation — placeholders regenerate.
   let fd: number;
   try {
-    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    refuseSymlink(path);
+    fd = openSync(path, constants.O_RDONLY | O_NOFOLLOW);
   } catch {
     // ELOOP: a symlink, refused deliberately. Anything else (EACCES, a race
     // after existsSync) also means "no placeholders to reuse" — degrade to
@@ -243,17 +264,18 @@ export function detectSpanDisagreement(
   emitted: Set<string>
 ): string | null {
   for (const a of assignments) {
-    if (a.endLine > a.startLine) continue;
     const parsed = envValues[a.key];
-    if (parsed === undefined || !parsed.includes("\n")) continue;
-    // A single-line `KEY="a\nb"` expands to real newlines, so compare counts
-    // rather than skipping the check whenever the value contains an escape —
-    // that escape hatch was controlled by whoever writes `.env`, and this
-    // backstop exists precisely for the case where the copied regex has
-    // drifted from the installed dotenv.
+    if (parsed === undefined) continue;
+    // Compare the lines the span claims against the newlines the parsed value
+    // actually has, discounting `\n` escapes that expand within one source
+    // line. Testing only `endLine === startLine` would catch a value scanned
+    // wholly as one line but miss a span closing *one* line early — and the
+    // partial case leaks identically, since the uncovered continuation line
+    // reaches the comment path where sanitize matches whole values, never a
+    // fragment.
     const escaped = (a.value.match(/\\n/g) ?? []).length;
     const actual = (parsed.match(/\n/g) ?? []).length;
-    if (actual <= escaped) continue;
+    if (a.endLine - a.startLine >= actual - escaped) continue;
     return (
       `Refusing to write .env.example: the value of ${a.key} spans lines per ` +
       `dotenv but was scanned as one line. The parser and the span scan ` +
@@ -294,7 +316,8 @@ export async function syncExample(
   let envContent: string;
   let fd: number;
   try {
-    fd = openSync(envPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    refuseSymlink(envPath);
+    fd = openSync(envPath, constants.O_RDONLY | O_NOFOLLOW);
   } catch (e: unknown) {
     const err = e as NodeJS.ErrnoException;
     if (err.code !== "ELOOP") throw e;
@@ -305,7 +328,7 @@ export async function syncExample(
       auditLog("sync_env_example", { status: "blocked" });
       return { error: "Refusing to read .env: symlink points outside project directory" };
     }
-    fd = openSync(realEnv, constants.O_RDONLY | constants.O_NOFOLLOW);
+    fd = openSync(realEnv, constants.O_RDONLY | O_NOFOLLOW);
   }
   try {
     envContent = readFileSync(fd, "utf-8");
@@ -335,9 +358,59 @@ export async function syncExample(
     for (let i = a.startLine + 1; i <= a.endLine; i++) consumed.add(i);
   }
 
+  /** The placeholder this tool will write for one assignment. */
+  const placeholderFor = (assignment: Assignment): string => {
+    const { key, value } = assignment;
+    const bareValue = unquote(value);
+    const existingEntry = existing.get(key);
+    const storedPlaceholder = unquote(existingEntry?.placeholder ?? "");
+    const generated = smartPlaceholder(key, bareValue);
+
+    // Reuse a curated placeholder from an existing .env.example, but NEVER for
+    // a key that names a secret. An earlier (buggy) run may have written the
+    // real value into the example file, and a stored value for a sensitive key
+    // is indistinguishable from a leaked one — so regenerate, routing it back
+    // through the deny-first gate.
+    const reusable =
+      existingEntry !== undefined &&
+      !SECRET_KEY_TOKENS.test(key) &&
+      scanForSecrets(storedPlaceholder) === storedPlaceholder &&
+      !hasUrlCredentials(storedPlaceholder) &&
+      // An opaque stored placeholder is a leaked value even after the live one
+      // rotates, so this does not depend on equality.
+      !OPAQUE_TOKEN.test(storedPlaceholder) &&
+      // Byte-identical to the live value IS that value — regenerate whenever
+      // this tool has a substitute of its own that differs, which catches
+      // SLACK_WEBHOOK=https://hooks.slack.com/services/... while leaving a
+      // curated APP_ENV=production and TZ=America/New_York intact.
+      (storedPlaceholder !== bareValue ||
+        generated === "" ||
+        generated === bareValue);
+    return reusable ? existingEntry!.placeholder : generated;
+  };
+
+  // Decide every placeholder before emitting anything, so the comment pass
+  // below knows which values this file will carry verbatim.
+  const placeholders = new Map<number, string>();
+  const echoedKeys = new Set<string>();
+  for (const a of assignments) {
+    if (!validKeys.has(a.key)) continue;
+    const placeholder = placeholderFor(a);
+    placeholders.set(a.startLine, placeholder);
+    if (unquote(placeholder) === unquote(a.value)) echoedKeys.add(a.key);
+  }
+
+  // Redacting a value the file prints verbatim one line above would render
+  // `NODE_ENV=production` followed by `# Use [REDACTED:NODE_ENV] credentials`.
+  // Ordinary .env files are full of short common-word values, and comment
+  // preservation is an advertised feature of a file humans read.
+  const commentValues = Object.fromEntries(
+    Object.entries(envValues).filter(([k]) => !echoedKeys.has(k))
+  );
+
   /**
    * Redact a comment before preserving it. `sanitize` against the live values
-   * catches a comment echoing a secret that is currently in `.env` — something
+   * catches a comment echoing a secret currently in `.env` — something
    * `scanForSecrets` structurally cannot do, since it only knows a handful of
    * well-known prefixes. A commented-out assignment is additionally routed
    * through `smartPlaceholder`, catching a parked credential by shape rather
@@ -357,17 +430,16 @@ export async function syncExample(
       if ((ENV_VAR_SHAPED.test(key) || known) && (separator.includes("=") || known)) {
         // Sanitize the whole line, not just the value: rawKey is emitted
         // verbatim, and a screaming-snake-shaped secret used as a commented
-        // key would otherwise reach the committed file untouched. Keeps
-        // "every exit path" a property of the function, not a case analysis.
+        // key would otherwise reach the committed file untouched.
         return sanitize(
           `${hash}${rawKey}${separator}${smartPlaceholder(key, rawValue.trim())}`,
-          envValues
+          commentValues
         );
       }
     }
     // sanitize ends with scanForSecrets itself; calling it first would tag a
     // token inside a known value as [REDACTED:detected] instead of naming it.
-    return sanitize(line, envValues);
+    return sanitize(line, commentValues);
   };
 
   const outputLines: string[] = [];
@@ -388,40 +460,11 @@ export async function syncExample(
       continue;
     }
 
-    const { key, exportPrefix, value } = assignment;
+    const { key, exportPrefix } = assignment;
     if (!validKeys.has(key)) continue;
 
-    // Reuse a curated placeholder from an existing .env.example, but NEVER for a
-    // key that names a secret. An earlier (buggy) run may have written the real
-    // value into the example file, and a stored value for a sensitive key is
-    // indistinguishable from a leaked one — so regenerate, routing it back
-    // through the deny-first gate. This heals leaks a value-equality check would
-    // miss (a rotated secret, or quoting drift between .env and .env.example).
-    // Non-sensitive keys keep their curated placeholder as before.
-    const existingEntry = existing.get(key);
-    const bareValue = unquote(value);
-    const storedPlaceholder = unquote(existingEntry?.placeholder ?? "");
-    const generated = smartPlaceholder(key, bareValue);
-    const reusable =
-      existingEntry !== undefined &&
-      !SECRET_KEY_TOKENS.test(key) &&
-      // A stored placeholder that scans as a secret, or carries URL
-      // credentials, is a leaked value from an earlier run — regenerate.
-      scanForSecrets(storedPlaceholder) === storedPlaceholder &&
-      !hasUrlCredentials(storedPlaceholder) &&
-      // An opaque stored placeholder is a leaked value even after the live one
-      // rotates, so this does not depend on equality.
-      !OPAQUE_TOKEN.test(storedPlaceholder) &&
-      // Byte-identical to the live value IS that value — regenerate whenever
-      // this tool has a substitute of its own that differs, which is what
-      // catches SLACK_WEBHOOK=https://hooks.slack.com/services/... while
-      // leaving a curated APP_ENV=production and TZ=America/New_York intact.
-      (storedPlaceholder !== bareValue ||
-        generated === "" ||
-        generated === bareValue);
-    const placeholder = reusable ? existingEntry!.placeholder : generated;
-
     // Preserve any custom comment from existing .env.example
+    const existingEntry = existing.get(key);
     if (existingEntry?.comment && !outputLines.at(-1)?.trim().startsWith("#")) {
       // Redact this too: a `.env.example` from an earlier, leakier run can
       // already hold a parked credential, and it would otherwise be re-emitted
@@ -429,19 +472,10 @@ export async function syncExample(
       outputLines.push(safeComment(existingEntry.comment));
     }
 
-    outputLines.push(`${exportPrefix}${key}=${placeholder}`);
+    outputLines.push(`${exportPrefix}${key}=${placeholders.get(i) ?? ""}`);
     emitted.add(key);
   }
 
-  // Write atomically via temp file + rename. renameSync replaces the destination
-  // path itself (including symlinks) rather than following it, closing both the
-  // TOCTOU window and any symlink traversal on .env.example.
-  // Backstop. If the span scan and dotenv's own parse ever disagree, a key
-  // goes missing here rather than a value being echoed there — and .env.example
-  // would be renamed over the curated original having silently lost it.
-  // Compare membership rather than counts: a `.env` that repeats a key emits
-  // more lines than validKeys has entries, and a count check would spend that
-  // slack covering for a key that really was dropped.
   const disagreement = detectSpanDisagreement(assignments, envValues, emitted);
   if (disagreement !== null) {
     auditLog("sync_env_example", { status: "blocked" });
@@ -456,7 +490,7 @@ export async function syncExample(
   // create stays atomic against anything racing to recreate it.
   const tmpPath = join(args.project_dir, ".env.example.tmp");
   const tmpFlags =
-    constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW;
+    constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | O_NOFOLLOW;
   let tmpFd: number;
   try {
     tmpFd = openSync(tmpPath, tmpFlags);
