@@ -213,7 +213,9 @@ export async function apiCall(
         return {
           status: 0,
           headers: {},
-          body: `Request blocked: exceeded ${MAX_REDIRECTS} redirects`,
+          // Constant today, but it sits below the loadEnv marker — wrapping it
+          // keeps "a `body:` without `sanitize(`" a mechanical check.
+          body: sanitize(`Request blocked: exceeded ${MAX_REDIRECTS} redirects`, env),
           ...(warnings.length > 0 ? { warnings } : {}),
         };
       }

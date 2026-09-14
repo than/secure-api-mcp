@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { mkdtempSync, writeFileSync, rmSync, utimesSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, utimesSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -57,5 +57,27 @@ describe("loadEnv - stale cache (mtime collision)", () => {
     // Must NOT serve stale cached value
     const second = loadEnv(dir);
     expect(second.API_KEY).toBe("rotated");
+  });
+});
+
+describe("loadEnv - symlink handling", () => {
+  it("refuses a .env symlinked outside the project", async () => {
+    const { loadEnv } = await import("./env-loader.js");
+    const project = tempDir();
+    const outside = tempDir();
+    const secrets = join(outside, "credentials");
+    writeFileSync(secrets, "AWS_SECRET_ACCESS_KEY=live-secret-value\n");
+    symlinkSync(secrets, join(project, ".env"));
+
+    expect(loadEnv(project)).toEqual({});
+  });
+
+  it("still reads a .env symlinked within the project", async () => {
+    const { loadEnv } = await import("./env-loader.js");
+    const project = tempDir();
+    writeFileSync(join(project, ".env.local"), "APP_ENV=production\n");
+    symlinkSync(join(project, ".env.local"), join(project, ".env"));
+
+    expect(loadEnv(project)).toEqual({ APP_ENV: "production" });
   });
 });

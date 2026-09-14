@@ -74,7 +74,10 @@ const DOTENV_LINE =
 const SINGLE_ASSIGN = /^\s*(export\s+)?([\w.-]+)(?:\s*=\s*?|:\s+?)/;
 
 /** Commented-out assignment, e.g. `# OLD_API_KEY=sk_live_...`. */
-const COMMENTED_ASSIGN = /^(\s*#+\s*)((?:export\s+)?[\w.-]+)(?:\s*=\s*|:\s+)(.*)$/;
+const COMMENTED_ASSIGN = /^(\s*#+\s*)((?:export\s+)?[\w.-]+)(\s*=\s*|:\s+)(.*)$/;
+
+/** Screaming snake with at least one underscore — `DB_PASSWORD`, not `TODO`. */
+const ENV_VAR_SHAPED = /^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$/;
 
 interface Assignment {
   key: string;
@@ -246,6 +249,9 @@ export async function syncExample(
   // dotenv is the authority on what is a key and what is value content. Its
   // multi-line quoted values span lines that have no `KEY=` shape — including
   // lines starting with `#`, which are secret material rather than comments.
+  // dotenv normalizes line endings before parsing. Match it, or a CR-only file
+  // collapses every assignment onto line 0 in the span scan below.
+  envContent = envContent.replace(/\r\n?/gm, "\n");
   const envValues = parse(envContent);
   const validKeys = new Set(Object.keys(envValues));
   const lines = envContent.split("\n");
@@ -271,11 +277,21 @@ export async function syncExample(
   const safeComment = (line: string): string => {
     const commented = COMMENTED_ASSIGN.exec(line);
     if (commented !== null) {
-      const [, hash, rawKey, rawValue] = commented;
+      const [, hash, rawKey, separator, rawValue] = commented;
       const key = rawKey.replace(/^export\s+/, "");
-      return `${hash}${rawKey}=${smartPlaceholder(key, rawValue.trim())}`;
+      // `# Note: rotate quarterly` and `# TODO: remove` parse as assignments
+      // too, and blanking them destroys the documentation this tool advertises
+      // preserving. Rewrite only when the key really looks like an env var, and
+      // — for the `:` form, which prose uses constantly — only when the key is
+      // one we actually know or one the deny-first gate names.
+      const known = validKeys.has(key) || SECRET_KEY_TOKENS.test(key);
+      if ((ENV_VAR_SHAPED.test(key) || known) && (separator.includes("=") || known)) {
+        return `${hash}${rawKey}${separator}${smartPlaceholder(key, rawValue.trim())}`;
+      }
     }
-    return sanitize(scanForSecrets(line), envValues);
+    // sanitize ends with scanForSecrets itself; calling it first would tag a
+    // token inside a known value as [REDACTED:detected] instead of naming it.
+    return sanitize(line, envValues);
   };
 
   const outputLines: string[] = [];

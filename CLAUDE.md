@@ -31,12 +31,13 @@ cloned from untrusted sources, and both the destination *and* any predictable
 temp path are plantable. Realpath containment is not a substitute: a
 `.env.example -> .env` symlink stays inside the project.
 
-In `sync_env_example` this holds: reads of `.env` and `.env.example` use
-`O_NOFOLLOW`, the temp write uses `O_EXCL | O_NOFOLLOW`. **`loadEnv`
-(`src/env-loader.ts`) does not** — it is a plain `readFileSync`, and it is the
-read behind `api_call`, `run_with_env` and `get_env_keys`. A `.env` symlinked
-to `~/.aws/credentials` parses fine there. Known gap, not yet closed; do not
-assume the guarantee is repo-wide.
+Every `.env` / `.env.example` read uses `O_NOFOLLOW`, and the temp write uses
+`O_EXCL | O_NOFOLLOW`. Two containment policies, deliberately different:
+`loadEnv` and the `.env` read in `sync_env_example` allow a symlink that
+resolves inside the project (`.env -> .env.local` is ordinary); the
+`.env.example` read refuses symlinks outright, because the dangerous case
+(`.env.example -> .env`) stays inside the project and containment would pass
+it.
 
 **`SECRET_KEY_TOKENS` is deny-first and incomplete by nature.** It matches
 whole underscore-delimited words, so `DATABASE_URL`, `REDIS_URL`, `SENTRY_DSN`

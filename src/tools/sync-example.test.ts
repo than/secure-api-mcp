@@ -503,6 +503,34 @@ describe("syncExample - multi-line values", () => {
     expect(out).toContain("BLOB=");
   });
 
+  it("preserves prose comments that look like assignments", async () => {
+    const project = tempProject();
+    writeFileSync(
+      join(project, ".env"),
+      "# Note: rotate this quarterly\n# TODO: remove after migration\n" +
+        "# Docs: https://stripe.com/docs\nAPP_ENV=production\n"
+    );
+
+    await syncExample({ project_dir: project });
+    const out = readFileSync(join(project, ".env.example"), "utf-8");
+
+    expect(out).toContain("# Note: rotate this quarterly");
+    expect(out).toContain("# TODO: remove after migration");
+    expect(out).toContain("# Docs: https://stripe.com/docs");
+  });
+
+  it("still blanks a commented assignment that uses a colon", async () => {
+    const project = tempProject();
+    // PASSWORD is named by the deny-first gate, so the `:` form is an
+    // assignment rather than prose.
+    writeFileSync(join(project, ".env"), "# PASSWORD: hunter2-prod-9f3a\nAPP_ENV=production\n");
+
+    await syncExample({ project_dir: project });
+    const out = readFileSync(join(project, ".env.example"), "utf-8");
+
+    expect(out).not.toContain("hunter2-prod-9f3a");
+  });
+
   it("redacts a non-brand credential parked in a comment", async () => {
     const project = tempProject();
     // scanForSecrets only knows well-known prefixes; this one has no brand.
