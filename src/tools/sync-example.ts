@@ -71,13 +71,6 @@ function smartPlaceholder(key: string, value: string): string {
 const DOTENV_LINE =
   /(?:^|^)\s*(?:export\s+)?([\w.-]+)(?:\s*=\s*?|:\s+?)(\s*'(?:\\'|[^'])*'|\s*"(?:\\"|[^"])*"|\s*`(?:\\`|[^`])*`|[^#\r\n]+)?\s*(?:#.*)?(?:$|$)/gm;
 
-/**
- * `O_NOFOLLOW` is POSIX-only, and `O_RDONLY | undefined` silently coerces to 0
- * — so on Windows the flag would vanish rather than fail loudly and both
- * read-side symlink controls would no-op. Fall back to an lstat check there. It
- * reintroduces the TOCTOU window the flag closes, but a narrow window beats no
- * control at all.
- */
 /** Single-line `KEY=value`, for reading this tool's own output back. */
 const SINGLE_ASSIGN = /^\s*(export\s+)?([\w.-]+)(?:\s*=\s*?|:\s+?)/;
 
@@ -103,6 +96,18 @@ function unquote(v: string): string {
  * legitimately shared default still survives.
  */
 const OPAQUE_TOKEN = /^(?=.*\d)(?=.*[a-zA-Z])[A-Za-z0-9]{20,}$/;
+
+/**
+ * A "key" of this shape with an empty value is a fragment of a value, not a
+ * key. A multi-line value that is unquoted — or quoted in a way dotenv resolves
+ * to its unquoted branch — leaves each following line scanned on its own, and a
+ * base64 line whose only non-word character is its trailing `=` tokenizes as
+ * `KEY=`. The tell is length without an underscore: real env var names of 16+
+ * characters effectively always carry one, and base64/base64url bodies never
+ * do. Deliberately not `OPAQUE_TOKEN`, which needs a digit and 20 characters —
+ * the padded tail of a PEM is short and often digit-free.
+ */
+const VALUE_FRAGMENT_KEY = /^[A-Za-z0-9.-]{16,}$/;
 
 /** Screaming snake with at least one underscore — `DB_PASSWORD`, not `TODO`. */
 const ENV_VAR_SHAPED = /^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$/;
@@ -393,7 +398,7 @@ export async function syncExample(
   const placeholders = new Map<number, string>();
   const echoedKeys = new Set<string>();
   for (const a of assignments) {
-    if (!validKeys.has(a.key) || OPAQUE_TOKEN.test(a.key)) continue;
+    if (!validKeys.has(a.key)) continue;
     const placeholder = placeholderFor(a);
     placeholders.set(a.startLine, placeholder);
     // Compare against the value comments are actually scrubbed against, not
@@ -473,7 +478,7 @@ export async function syncExample(
     // assignment path does not sanitize, sanitize could not match a fragment
     // anyway, and scanForSecrets deliberately excludes generic base64. Same
     // reasoning safeComment already applies to commented keys.
-    if (OPAQUE_TOKEN.test(key)) {
+    if (VALUE_FRAGMENT_KEY.test(key) && (placeholders.get(i) ?? "") === "") {
       // Record it anyway, or detectSpanDisagreement reads a deliberately
       // dropped key as a lost one and refuses the whole write.
       emitted.add(key);

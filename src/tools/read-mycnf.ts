@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { isAbsolute } from "node:path";
 import { homedir } from "node:os";
+import { sanitize } from "../utils/sanitize.js";
 import { loadMyCnf } from "../mycnf-loader.js";
 import { validateProjectDir } from "../security/path-validator.js";
 import { auditLog } from "../security/audit.js";
@@ -43,7 +44,11 @@ export async function readMyCnf(
         redacted[sectionName][field] = `[REDACTED:${sectionName}.${field}]`;
         keysAccessedCount++;
       } else {
-        redacted[sectionName][field] = value;
+        // The field-name gate is a denylist over a format with plenty of other
+        // places to put a credential — `init-command` can interpolate the
+        // password, and `pager`/`ssl-key` are not in SECRET_FIELDS. One exit,
+        // one predicate: run the non-secret values through the sanitizer too.
+        redacted[sectionName][field] = sanitize(value, secrets);
       }
     }
   }

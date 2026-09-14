@@ -99,4 +99,18 @@ describe("readMyCnf", () => {
       status: "success",
     });
   });
+
+  it("sanitizes a secret echoed inside a non-secret field", async () => {
+    // init-command is not in SECRET_FIELDS but can interpolate the password.
+    mockLoadMyCnf.mockReturnValue({
+      sections: {
+        client: { password: "hunter2-prod", "init-command": "SET x='hunter2-prod'" },
+      },
+      secrets: { "client.password": "hunter2-prod" },
+    });
+
+    const result = await readMyCnf({ project_dir: "/fake/project" });
+
+    expect(JSON.stringify(result)).not.toContain("hunter2-prod");
+  });
 });

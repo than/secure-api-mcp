@@ -619,6 +619,35 @@ describe("syncExample - multi-line values", () => {
     expect(result).not.toHaveProperty("error");
   });
 
+  it("drops a short digit-free base64 tail that tokenizes as a key", async () => {
+    const project = tempProject();
+    // The padded tail of a PEM is where `=` actually lives, and it is short and
+    // often digit-free — under the OPAQUE_TOKEN shape, over the fragment one.
+    writeFileSync(
+      join(project, ".env"),
+      'KEY="-----BEGIN-----\nZXhhbXBsZXNlY3JldA=\n'
+    );
+
+    await syncExample({ project_dir: project });
+    const out = readFileSync(join(project, ".env.example"), "utf-8");
+
+    expect(out).not.toContain("ZXhhbXBsZXNlY3JldA");
+  });
+
+  it("drops a base64url tail containing a hyphen", async () => {
+    const project = tempProject();
+    writeFileSync(
+      join(project, ".env"),
+      'KEY="-----BEGIN-----\nZXhhbXBsZS1zZWNyZXQtdg=\n'
+    );
+
+    await syncExample({ project_dir: project });
+
+    expect(readFileSync(join(project, ".env.example"), "utf-8")).not.toContain(
+      "ZXhhbXBsZS1zZWNyZXQtdg"
+    );
+  });
+
   it("does not refuse when an earlier duplicate is single-line", async () => {
     const project = tempProject();
     // parse() keeps only the last FOO, so comparing the first against it
