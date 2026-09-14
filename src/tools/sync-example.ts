@@ -4,6 +4,7 @@ import { readFileSync, writeFileSync, existsSync, realpathSync, openSync, closeS
 import { join } from "node:path";
 import { validateProjectDir } from "../security/path-validator.js";
 import { auditLog } from "../security/audit.js";
+import { sanitize } from "../utils/sanitize.js";
 import { scanForSecrets } from "../security/scanner.js";
 import { parse } from "dotenv";
 
@@ -58,35 +59,66 @@ function smartPlaceholder(key: string, value: string): string {
 }
 
 /**
- * dotenv's own assignment prefix. It accepts `:` as well as `=`, and any
- * whitespace after `export` — hand-computing the boundary with indexOf("=")
- * missed the colon form entirely, so a quoted multi-line value opened with `:`
- * never reached the openQuote bookkeeping below. Per CLAUDE.md: don't
+ * dotenv's LINE regex, copied verbatim from `dotenv/lib/main.js`. This is the
+ * tokenizer of record: `parse()` is this pattern in a loop. Re-deriving where a
+ * value starts and ends by hand kept diverging from it — on the `:` separator,
+ * on a trailing `# comment`, on `JSON="{"a":1}"`, on a `\\` run before the
+ * closing quote — and every divergence in the "closes early" direction wrote
+ * key material into a file meant to be committed. Per CLAUDE.md: don't
  * hand-parse `.env`.
  */
-const ASSIGN = /^\s*(export\s+)?([\w.-]+)(?:\s*=\s*?|:\s+?)/;
+const DOTENV_LINE =
+  /(?:^|^)\s*(?:export\s+)?([\w.-]+)(?:\s*=\s*?|:\s+?)(\s*'(?:\\'|[^'])*'|\s*"(?:\\"|[^"])*"|\s*`(?:\\`|[^`])*`|[^#\r\n]+)?\s*(?:#.*)?(?:$|$)/gm;
+
+/** Single-line `KEY=value`, for reading this tool's own output back. */
+const SINGLE_ASSIGN = /^\s*(export\s+)?([\w.-]+)(?:\s*=\s*?|:\s+?)/;
+
+/** Commented-out assignment, e.g. `# OLD_API_KEY=sk_live_...`. */
+const COMMENTED_ASSIGN = /^(\s*#+\s*)((?:export\s+)?[\w.-]+)(?:\s*=\s*|:\s+)(.*)$/;
+
+interface Assignment {
+  key: string;
+  exportPrefix: string;
+  value: string;
+  /** Source line the assignment starts on. */
+  startLine: number;
+  /** Last source line its value occupies; equals startLine unless multi-line. */
+  endLine: number;
+}
 
 /**
- * True if a quoted value closes on this line. dotenv's quoted alternative is
- * `"(?:\\"|[^"])*"`; `[^"]` cannot cross an unescaped quote, so that
- * alternative always ends at the first one and can never backtrack past it.
- * Any unescaped quote therefore ends the value — whatever follows it.
- *
- * Two readings fail here. Testing the end of the *line* treats the documented
- * `KEY="v"  # note` as still open. Requiring a clean `\s*(#.*)?` tail instead
- * treats `JSON_CONFIG="{"a":1}"` as open, swallows the rest of the file, and
- * then blames an unterminated quote that does not exist — dotenv parses that
- * line by falling through to its unquoted branch, which cannot span newlines.
+ * Every assignment dotenv finds, with the exact source lines its value spans.
+ * Uses match indices so the span comes from the parser rather than from
+ * re-reading the text.
  */
-function closesQuote(s: string, quote: string, from: number): boolean {
-  for (let i = from; i < s.length; i++) {
-    if (s[i] === "\\") {
-      i++;
+function scanAssignments(content: string): Assignment[] {
+  const countNewlines = (upTo: number) => {
+    let n = 0;
+    for (let i = 0; i < upTo; i++) if (content[i] === "\n") n++;
+    return n;
+  };
+
+  const out: Assignment[] = [];
+  const re = new RegExp(DOTENV_LINE.source, "dgm");
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(content)) !== null) {
+    if (m[0].length === 0) {
+      re.lastIndex++;
       continue;
     }
-    if (s[i] === quote) return true;
+    const indices = (m as RegExpExecArray & { indices: Array<[number, number] | undefined> })
+      .indices;
+    const keySpan = indices[1]!;
+    const valueSpan = indices[2];
+    out.push({
+      key: m[1],
+      exportPrefix: /^\s*(export\s+)/.exec(m[0])?.[1] ?? "",
+      value: (m[2] ?? "").trim(),
+      startLine: countNewlines(keySpan[0]),
+      endLine: countNewlines(valueSpan ? valueSpan[1] : keySpan[1]),
+    });
   }
-  return false;
+  return out;
 }
 
 /**
@@ -127,16 +159,20 @@ function parseExistingExample(
   let fd: number;
   try {
     fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-  } catch (e: unknown) {
-    // ELOOP: a symlink, refused above. Anything else (EACCES, a directory
-    // raced into place after existsSync) also means "no placeholders to
-    // reuse" — degrade to regenerating them rather than throwing past the
-    // structured error contract every other failure here honours.
+  } catch {
+    // ELOOP: a symlink, refused deliberately. Anything else (EACCES, a race
+    // after existsSync) also means "no placeholders to reuse" — degrade to
+    // regenerating them rather than throwing past the structured error
+    // contract every other failure here honours.
     return map;
   }
   let content: string;
   try {
     content = readFileSync(fd, "utf-8");
+  } catch {
+    // open(2) on a directory succeeds with O_RDONLY, so EISDIR lands here
+    // rather than above.
+    return map;
   } finally {
     closeSync(fd);
   }
@@ -149,9 +185,10 @@ function parseExistingExample(
       pendingComment = trimmed;
       continue;
     }
-    const assign = ASSIGN.exec(line);
+    // `.env.example` is this tool's own output — single-line `KEY=value`. Use
+    // the same tokenizer anyway so `export FOO` keys on `FOO` at lookup.
+    const assign = SINGLE_ASSIGN.exec(line);
     if (assign !== null) {
-      // Key on the export-stripped form so `export FOO` matches `FOO` at lookup.
       const key = assign[2];
       const placeholder = line.slice(assign[0].length).trim();
       map.set(key, { comment: pendingComment, placeholder });
@@ -206,60 +243,60 @@ export async function syncExample(
 
   const existing = parseExistingExample(examplePath);
 
-  // Take the authoritative key set from the same parser the server itself uses
-  // (env-loader.ts). dotenv supports multi-line double-quoted values, so a PEM
-  // body spans lines that have no `KEY=` shape — splitting on "\n" alone would
-  // echo that key material straight into the file we write. Only lines whose
-  // key dotenv actually recognizes get emitted; anything else is dropped.
-  const validKeys = new Set(Object.keys(parse(envContent)));
+  // dotenv is the authority on what is a key and what is value content. Its
+  // multi-line quoted values span lines that have no `KEY=` shape — including
+  // lines starting with `#`, which are secret material rather than comments.
+  const envValues = parse(envContent);
+  const validKeys = new Set(Object.keys(envValues));
   const lines = envContent.split("\n");
 
-  // Tracks the quote character of a value still spanning lines. dotenv's value
-  // pattern matches across newlines *and* across `#`, so a continuation line
-  // beginning with `#` is secret material, not a comment — it must be dropped
-  // before the comment passthrough below ever sees it.
-  let openQuote: string | null = null;
+  // Lines consumed by a value that began earlier: never emitted, never treated
+  // as comments.
+  const assignments = scanAssignments(envContent);
+  const assignmentAt = new Map<number, Assignment>();
+  const consumed = new Set<number>();
+  for (const a of assignments) {
+    assignmentAt.set(a.startLine, a);
+    for (let i = a.startLine + 1; i <= a.endLine; i++) consumed.add(i);
+  }
+
+  /**
+   * Redact a comment before preserving it. `sanitize` against the live values
+   * catches a comment echoing a secret that is currently in `.env` — something
+   * `scanForSecrets` structurally cannot do, since it only knows a handful of
+   * well-known prefixes. A commented-out assignment is additionally routed
+   * through `smartPlaceholder`, catching a parked credential by shape rather
+   * than by brand.
+   */
+  const safeComment = (line: string): string => {
+    const commented = COMMENTED_ASSIGN.exec(line);
+    if (commented !== null) {
+      const [, hash, rawKey, rawValue] = commented;
+      const key = rawKey.replace(/^export\s+/, "");
+      return `${hash}${rawKey}=${smartPlaceholder(key, rawValue.trim())}`;
+    }
+    return sanitize(scanForSecrets(line), envValues);
+  };
+
   const outputLines: string[] = [];
   const emitted = new Set<string>();
 
-  for (const line of lines) {
-    // Inside a multi-line quoted value: drop every line until the quote closes.
-    if (openQuote !== null) {
-      if (closesQuote(line, openQuote, 0)) openQuote = null;
+  for (let i = 0; i < lines.length; i++) {
+    if (consumed.has(i)) continue;
+
+    const line = lines[i];
+    const assignment = assignmentAt.get(i);
+
+    if (assignment === undefined) {
+      const trimmed = line.trim();
+      // Preserve blank lines and comments; drop anything else rather than
+      // echoing it.
+      if (trimmed === "") outputLines.push(line);
+      else if (trimmed.startsWith("#")) outputLines.push(safeComment(line));
       continue;
     }
 
-    const trimmed = line.trim();
-
-    // Preserve blank lines and comments — but run comments through the scanner
-    // first. `# OLD_API_KEY=sk-live-...` is how a rotated key usually gets
-    // parked, and this file is meant to be committed.
-    if (trimmed === "" || trimmed.startsWith("#")) {
-      outputLines.push(trimmed === "" ? line : scanForSecrets(line));
-      continue;
-    }
-
-    const assign = ASSIGN.exec(line);
-    if (assign === null) continue;
-
-    // Keep the export prefix on the way out so the file round-trips.
-    const exportPrefix = assign[1] ?? "";
-    const key = assign[2];
-    const value = line.slice(assign[0].length).trim();
-
-    // Record an unclosed opening quote before any early exit below, so the
-    // continuation lines are still swallowed.
-    const quote = value[0];
-    if (
-      (quote === '"' || quote === "'" || quote === "`") &&
-      // Scan from past the opening quote.
-      !closesQuote(value, quote, 1)
-    ) {
-      openQuote = quote;
-    }
-
-    // Not a key dotenv recognized => a continuation line inside a quoted value.
-    // Drop it rather than pass it through verbatim.
+    const { key, exportPrefix, value } = assignment;
     if (!validKeys.has(key)) continue;
 
     // Reuse a curated placeholder from an existing .env.example, but NEVER for a
@@ -270,24 +307,34 @@ export async function syncExample(
     // miss (a rotated secret, or quoting drift between .env and .env.example).
     // Non-sensitive keys keep their curated placeholder as before.
     const existingEntry = existing.get(key);
+    const generated = smartPlaceholder(key, value);
     const reusable =
       existingEntry !== undefined &&
       !SECRET_KEY_TOKENS.test(key) &&
-      // A stored placeholder that scans as a secret, or carries URL userinfo,
-      // is a leaked value from an earlier run — regenerate instead of copying.
+      // A stored placeholder that scans as a secret, or carries URL
+      // credentials, is a leaked value from an earlier run — regenerate.
       scanForSecrets(existingEntry.placeholder) === existingEntry.placeholder &&
-      !hasUrlCredentials(existingEntry.placeholder);
-    const placeholder = reusable
-      ? existingEntry!.placeholder
-      : smartPlaceholder(key, value);
+      !hasUrlCredentials(existingEntry.placeholder) &&
+      // Residual case CLAUDE.md warns SECRET_KEY_TOKENS will miss:
+      // SLACK_WEBHOOK=https://hooks.slack.com/services/T00/B00/XXXX clears the
+      // key regex, the scanner and hasUrlCredentials, yet a stored copy
+      // byte-identical to the live value is that value. Regenerate only when
+      // this tool has an opinion of its own that differs — a blank generated
+      // placeholder means no opinion, which is what keeps a curated
+      // APP_ENV=production intact.
+      !(
+        generated !== "" &&
+        generated !== value &&
+        existingEntry.placeholder === value
+      );
+    const placeholder = reusable ? existingEntry!.placeholder : generated;
 
     // Preserve any custom comment from existing .env.example
     if (existingEntry?.comment && !outputLines.at(-1)?.trim().startsWith("#")) {
-      // Scan this too. A `.env.example` written by an earlier, leakier run can
-      // already hold `# OLD_API_KEY=sk_live_...`; parseExistingExample picks it
-      // up as pendingComment and it would be re-emitted verbatim even when the
-      // value beside it is being regenerated.
-      outputLines.push(scanForSecrets(existingEntry.comment));
+      // Redact this too: a `.env.example` from an earlier, leakier run can
+      // already hold a parked credential, and it would otherwise be re-emitted
+      // verbatim even while the value beside it is regenerated.
+      outputLines.push(safeComment(existingEntry.comment));
     }
 
     outputLines.push(`${exportPrefix}${key}=${placeholder}`);
@@ -297,9 +344,9 @@ export async function syncExample(
   // Write atomically via temp file + rename. renameSync replaces the destination
   // path itself (including symlinks) rather than following it, closing both the
   // TOCTOU window and any symlink traversal on .env.example.
-  // An unterminated quote leaves openQuote set for the rest of the file, so
-  // every later key is dropped — and .env.example is then renamed over the
-  // curated original having silently lost them. validKeys is ground truth.
+  // Backstop. If the span scan and dotenv's own parse ever disagree, a key
+  // goes missing here rather than a value being echoed there — and .env.example
+  // would be renamed over the curated original having silently lost it.
   // Compare membership rather than counts: a `.env` that repeats a key emits
   // more lines than validKeys has entries, and a count check would spend that
   // slack covering for a key that really was dropped.

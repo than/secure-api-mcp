@@ -377,11 +377,14 @@ describe("syncExample - multi-line values", () => {
       'GREETING="still open\nAPI_HOST=example.com\nPORT=3000\n'
     );
 
+    // dotenv recovers via its unquoted branch, and the span scan is that same
+    // regex — so all three keys are found and none of the value leaks.
     const result = await syncExample({ project_dir: project });
+    const out = readFileSync(join(project, ".env.example"), "utf-8");
 
-    expect(result).toHaveProperty("error");
-    // The curated original must survive untouched.
-    expect(readFileSync(join(project, ".env.example"), "utf-8")).toContain("PORT=3000");
+    expect(result).toMatchObject({ keys_synced: 3 });
+    expect(out).toContain("PORT=3000");
+    expect(out).not.toContain("still open");
   });
 
   it("refuses a lossy write even when .env repeats a key", async () => {
@@ -392,9 +395,11 @@ describe("syncExample - multi-line values", () => {
     writeFileSync(join(project, ".env"), 'A=1\nA=2\nFOO="unclosed\nBAR=3\n');
 
     const result = await syncExample({ project_dir: project });
+    const out = readFileSync(join(project, ".env.example"), "utf-8");
 
-    expect(result).toHaveProperty("error");
-    expect(readFileSync(join(project, ".env.example"), "utf-8")).toContain("BAR=3");
+    expect(out).toContain("BAR=");
+    expect(out).not.toContain("unclosed");
+    expect(result).not.toHaveProperty("error");
   });
 
   it("handles a trailing comment after a quoted value", async () => {
@@ -481,6 +486,37 @@ describe("syncExample - multi-line values", () => {
     expect(out).not.toContain(fakeKey);
   });
 
+  it("keeps a value open across an even backslash run, as dotenv does", async () => {
+    const project = tempProject();
+    // `\\` is consumed by [^"], so the following `\"` escapes the quote and
+    // dotenv keeps spanning. Closing early here put the comment line — real
+    // secret material — straight into the committed file.
+    writeFileSync(
+      join(project, ".env"),
+      'BLOB="a\\\\\\\\"\n# DB_PASSWORD=hunter2-prod\nend"\n'
+    );
+
+    await syncExample({ project_dir: project });
+    const out = readFileSync(join(project, ".env.example"), "utf-8");
+
+    expect(out).not.toContain("hunter2-prod");
+    expect(out).toContain("BLOB=");
+  });
+
+  it("redacts a non-brand credential parked in a comment", async () => {
+    const project = tempProject();
+    // scanForSecrets only knows well-known prefixes; this one has no brand.
+    writeFileSync(
+      join(project, ".env"),
+      "# DB_PASSWORD=hunter2-prod-9f3a\nAPP_ENV=production\n"
+    );
+
+    await syncExample({ project_dir: project });
+    const out = readFileSync(join(project, ".env.example"), "utf-8");
+
+    expect(out).not.toContain("hunter2-prod-9f3a");
+  });
+
   it("treats an apostrophe as closing a single-quoted value, as dotenv does", async () => {
     const project = tempProject();
     // dotenv's `'(?:\\'|[^'])*'` closes at the apostrophe, yielding `it`, and
@@ -552,6 +588,21 @@ describe("syncExample - placeholder reuse", () => {
     expect(out).toContain("APP_NAME=my-app");
     expect(out).toContain("# The display name");
     expect(out).not.toContain("real-production-name");
+  });
+
+  it("regenerates a stored webhook URL identical to the live value", async () => {
+    const project = tempProject();
+    // SLACK_WEBHOOK clears SECRET_KEY_TOKENS, the scanner and the userinfo /
+    // query-param checks — the secret is in the path.
+    const url = "https://hooks.slack.com/services/T00000/B00000/XXXXXXXXXXXX";
+    writeFileSync(join(project, ".env"), `SLACK_WEBHOOK=${url}\n`);
+    writeFileSync(join(project, ".env.example"), `SLACK_WEBHOOK=${url}\n`);
+
+    await syncExample({ project_dir: project });
+    const out = readFileSync(join(project, ".env.example"), "utf-8");
+
+    expect(out).not.toContain(url);
+    expect(out).toContain("SLACK_WEBHOOK=https://example.com");
   });
 
   it("regenerates a stored placeholder whose URL carries a credential query param", async () => {

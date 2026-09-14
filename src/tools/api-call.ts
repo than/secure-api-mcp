@@ -113,6 +113,10 @@ export async function apiCall(
     };
   }
 
+  // Everything above this line returns before any secret is in hand: the
+  // messages interpolate pathCheck/urlCheck reasons derived from the
+  // model-supplied project_dir and url, and no env value can reach them. Any
+  // return added BELOW this line must be sanitized — see CLAUDE.md.
   const env = loadEnv(args.project_dir);
 
   const interpolated = args.headers
@@ -227,7 +231,12 @@ export async function apiCall(
           // Built from the raw Location header rather than nextUrl, which has been
           // through `new URL()` and so is normalized (host lowercased, escapes
           // rewritten). Report what the server actually sent.
-          body: sanitize(`Request blocked: redirect to ${location} — ${nextCheck.reason}`, env),
+          body: sanitize(
+            // Raw header plus resolved URL: a relative `Location: /cb` says
+            // nothing on its own, and some reason branches carry no host.
+            `Request blocked: redirect to ${location} (${nextUrl}) — ${nextCheck.reason}`,
+            env
+          ),
           ...(warnings.length > 0 ? { warnings } : {}),
         };
       }
@@ -238,7 +247,7 @@ export async function apiCall(
         return {
           status: 0,
           headers: {},
-          body: sanitize(`Request blocked: redirect to ${location} — ${nextBlocked}`, env),
+          body: sanitize(`Request blocked: redirect to ${location} (${nextUrl}) — ${nextBlocked}`, env),
           ...(warnings.length > 0 ? { warnings } : {}),
         };
       }
