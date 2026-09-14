@@ -21,7 +21,7 @@ interface CacheEntry {
 const cache = new Map<string, CacheEntry>();
 
 /**
- * As `loadEnv`, but distinguishes "refused by policy" from "no .env here".
+ * Loads `.env`, distinguishing "refused by policy" from "no .env here".
  * A refusal otherwise disappears: the tools see an empty env, skip injection,
  * skip the allowlist check (nothing was injected), and send the request with
  * the placeholder left literal — so the caller gets a bare 401 and no reason,
@@ -31,8 +31,6 @@ const cache = new Map<string, CacheEntry>();
 export function loadEnvChecked(projectDir: string): LoadEnvResult {
   const envPath = join(projectDir, ".env");
 
-  // Read the file first, then stat — avoids TOCTOU race where file
-  // could change between stat (mtime check) and read (content load)
   // Read with O_NOFOLLOW to close the TOCTOU window between a symlink check and
   // the read. A cloned repo shipping `.env -> ~/.aws/credentials` otherwise
   // parses fine here, and this is the read behind api_call, run_with_env and

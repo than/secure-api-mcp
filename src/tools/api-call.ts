@@ -281,6 +281,12 @@ export async function apiCall(
           }
         }
         if (dropped.length > 0) {
+          // Nothing sensitive rides on from here: only headers are
+          // interpolated, and every header carrying an injected value was just
+          // removed. Leaving injectedKeys populated would make the next hop
+          // report "Secret(s) sent to ..." for a request that carries none,
+          // and would block a further hop as secret-bearing when it is not.
+          injectedKeys.clear();
           warnings.push(
             sanitize(
               `Dropped ${dropped.join(", ")} on cross-origin redirect to ` +

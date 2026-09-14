@@ -2,7 +2,7 @@ import { z } from "zod";
 import { isAbsolute } from "node:path";
 import { execFile } from "node:child_process";
 import { loadEnvChecked } from "../env-loader.js";
-import { isPlausibleEnvKey, keyStub } from "../utils/env-key.js";
+import { isPlausibleEnvKey, omittedKeysNote } from "../utils/env-key.js";
 import { loadMyCnf } from "../mycnf-loader.js";
 import { homedir } from "node:os";
 import { sanitize } from "../utils/sanitize.js";
@@ -125,9 +125,7 @@ export async function runWithEnv(
     const dropped = Object.keys(env).filter((k) => !isPlausibleEnvKey(k));
     if (dropped.length > 0) {
       warnings.push(
-        `Did not inject ${dropped.length} key(s) that look like fragments of a ` +
-          `multi-line value rather than names: ${dropped.map(keyStub).join(", ")}. ` +
-          `Pass env_keys explicitly to override.`
+        omittedKeysNote(dropped.length, "Pass env_keys explicitly to override.")
       );
     }
   }

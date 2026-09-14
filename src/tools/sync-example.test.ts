@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { mkdtempSync, writeFileSync, symlinkSync, rmSync, readFileSync, lstatSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync, readFileSync, lstatSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { syncExample, detectSpanDisagreement } from "./sync-example.js";
@@ -748,6 +748,19 @@ describe("syncExample - multi-line values", () => {
 
     expect(out).toContain("APP_ENV=production");
     expect(out).toContain("NODE_ENV=production");
+  });
+
+  it("returns a structured error when .env.example is a directory", async () => {
+    const project = tempProject();
+    writeFileSync(join(project, ".env"), "APP_ENV=production\n");
+    mkdirSync(join(project, ".env.example"));
+    writeFileSync(join(project, ".env.example", ".gitkeep"), "");
+
+    const result = await syncExample({ project_dir: project });
+
+    expect(result).toHaveProperty("error");
+    // And no stray temp file left in the working tree.
+    expect(existsSync(join(project, ".env.example.tmp"))).toBe(false);
   });
 
   it("keeps a punctuated shared default such as a timezone", async () => {

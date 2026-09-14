@@ -21,12 +21,16 @@ export function isPlausibleEnvKey(key: string): boolean {
 }
 
 /**
- * A recognizable stub for an omitted key. Naming an omitted key in full would
- * re-expose the fragment the filter exists to hide, but a caller who lost a
- * legitimate camelCase key needs enough to recognize it and pass `env_keys`
- * explicitly. Eight characters identifies `databaseConnectio…` without
- * yielding anything usable from `QUJDREVG…`.
+ * How to describe omitted keys to the caller without emitting any of their
+ * bytes. A truncated stub would still be a slice of a secret value, which is
+ * the one thing the tool promises never to hand over — and the shape rule plus
+ * a count is enough for someone looking at their own `.env` to identify a
+ * legitimate key and pass it via `env_keys`.
  */
-export function keyStub(key: string): string {
-  return key.length <= 8 ? key : `${key.slice(0, 8)}…`;
+export function omittedKeysNote(count: number, escapeHatch: string): string {
+  return (
+    `Omitted ${count} key(s) of 16+ characters mixing upper and lower case, ` +
+    `which is the shape of a base64 fragment rather than a name — check .env ` +
+    `for an unquoted or unterminated multi-line value. ${escapeHatch}`
+  );
 }

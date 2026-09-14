@@ -568,10 +568,26 @@ export async function syncExample(
   }
   try {
     writeFileSync(tmpFd, outputLines.join("\n") + "\n");
-  } finally {
+  } catch {
     closeSync(tmpFd);
+    unlinkSync(tmpPath);
+    auditLog("sync_env_example", { status: "error" });
+    return { error: "Refusing to write .env.example: temp file is not writable" };
   }
-  renameSync(tmpPath, examplePath);
+  closeSync(tmpFd);
+  try {
+    renameSync(tmpPath, examplePath);
+  } catch {
+    // A committed `.env.example/` directory needs no race: existsSync passes,
+    // parseExistingExample degrades on EISDIR, and the rename then fails with
+    // ENOTEMPTY. Unwrapped, that rejects the tool call with an absolute path
+    // and leaves .env.example.tmp in the working tree.
+    unlinkSync(tmpPath);
+    auditLog("sync_env_example", { status: "error" });
+    return {
+      error: "Refusing to write .env.example: destination is not a regular file",
+    };
+  }
   const syncedCount = emitted.size - droppedFragments.size;
   auditLog("sync_env_example", { keysAccessedCount: syncedCount, status: "success" });
   return { path: examplePath, keys_synced: syncedCount };
