@@ -117,7 +117,20 @@ export async function runWithEnv(
   // With env_keys unset the default is "everything", which would turn a
   // value fragment dotenv mistook for a key into a child-process variable
   // name. An explicit env_keys is the caller's own choice and is left alone.
-  const keys = args.env_keys ?? Object.keys(env).filter(isPlausibleEnvKey);
+  let keys: string[];
+  if (args.env_keys) {
+    keys = args.env_keys;
+  } else {
+    keys = Object.keys(env).filter(isPlausibleEnvKey);
+    const dropped = Object.keys(env).length - keys.length;
+    if (dropped > 0) {
+      warnings.push(
+        `Did not inject ${dropped} key(s) that look like fragments of a ` +
+          `multi-line value rather than names. Pass env_keys explicitly to ` +
+          `override.`
+      );
+    }
+  }
   for (const key of keys) {
     if (key in env) {
       injectedEnv[key] = env[key];

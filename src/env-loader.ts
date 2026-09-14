@@ -1,6 +1,6 @@
 import { readFileSync, statSync, openSync, closeSync, realpathSync, constants } from "node:fs";
 import { O_NOFOLLOW, refuseSymlink } from "./security/nofollow.js";
-import { isWithin } from "./utils/env-key.js";
+import { isWithin } from "./utils/path.js";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { parse } from "dotenv";

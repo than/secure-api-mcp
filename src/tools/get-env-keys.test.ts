@@ -34,8 +34,23 @@ describe("getEnvKeys", () => {
       },
     });
 
+    const result = await getEnvKeys({ project_dir: "/fake/project" });
+
+    expect(result).toMatchObject({ keys: ["PRIVATE_KEY"] });
+    // Dropping it silently would read as a missing variable.
+    expect((result as { warnings?: string[] }).warnings?.join(" ")).toMatch(
+      /fragments of a/
+    );
+  });
+
+  it("keeps a dotted key that is not a fragment", async () => {
+    // Lowercase and dotted: a real Spring-style key, no mixed case.
+    mockLoadEnvChecked.mockReturnValue({
+      env: { "spring.datasource.password": "x" },
+    });
+
     expect(await getEnvKeys({ project_dir: "/fake/project" })).toEqual({
-      keys: ["PRIVATE_KEY"],
+      keys: ["spring.datasource.password"],
     });
   });
 

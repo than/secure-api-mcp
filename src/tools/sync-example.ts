@@ -5,7 +5,8 @@ import { join } from "node:path";
 import { validateProjectDir } from "../security/path-validator.js";
 import { auditLog } from "../security/audit.js";
 import { sanitize } from "../utils/sanitize.js";
-import { VALUE_FRAGMENT_KEY, isWithin } from "../utils/env-key.js";
+import { VALUE_FRAGMENT_KEY } from "../utils/env-key.js";
+import { isWithin } from "../utils/path.js";
 import { O_NOFOLLOW, refuseSymlink } from "../security/nofollow.js";
 import { scanForSecrets } from "../security/scanner.js";
 import { parse } from "dotenv";
@@ -318,7 +319,14 @@ export async function syncExample(
     fd = openSync(envPath, constants.O_RDONLY | O_NOFOLLOW);
   } catch (e: unknown) {
     const err = e as NodeJS.ErrnoException;
-    if (err.code !== "ELOOP") throw e;
+    if (err.code !== "ELOOP") {
+      // existsSync is true for a directory and O_RDONLY|O_NOFOLLOW succeeds on
+      // one, so EISDIR lands on the read below; EACCES lands here. Either way,
+      // return the structured error the rest of this function honours instead
+      // of rejecting the tool call with a raw message and an absolute path.
+      auditLog("sync_env_example", { status: "error" });
+      return { error: `Cannot read .env: ${err.code ?? "unknown error"}` };
+    }
     // .env is a symlink — block if it resolves outside the project
     const realEnv = realpathSync(envPath);
     const realProject = realpathSync(args.project_dir);
@@ -330,6 +338,11 @@ export async function syncExample(
   }
   try {
     envContent = readFileSync(fd, "utf-8");
+  } catch (e: unknown) {
+    auditLog("sync_env_example", { status: "error" });
+    return {
+      error: `Cannot read .env: ${(e as NodeJS.ErrnoException).code ?? "unknown error"}`,
+    };
   } finally {
     closeSync(fd);
   }
@@ -447,6 +460,10 @@ export async function syncExample(
 
   const outputLines: string[] = [];
   const emitted = new Set<string>();
+  // Tracked separately from `emitted`: these are recorded so
+  // detectSpanDisagreement does not read a deliberate drop as a lost key, but
+  // they were not written, so they must not inflate keys_synced.
+  const droppedFragments = new Set<string>();
 
   for (let i = 0; i < lines.length; i++) {
     if (consumed.has(i)) continue;
@@ -473,6 +490,7 @@ export async function syncExample(
     // anyway, and scanForSecrets deliberately excludes generic base64. Same
     // reasoning safeComment already applies to commented keys.
     if (VALUE_FRAGMENT_KEY.test(key) && (placeholders.get(i) ?? "") === "") {
+      droppedFragments.add(key);
       // Record it anyway, or detectSpanDisagreement reads a deliberately
       // dropped key as a lost one and refuses the whole write.
       emitted.add(key);
@@ -488,7 +506,15 @@ export async function syncExample(
       outputLines.push(safeComment(existingEntry.comment));
     }
 
-    outputLines.push(`${exportPrefix}${key}=${placeholders.get(i) ?? ""}`);
+    // Scan the emitted line. safeComment already does this for commented
+    // assignments, for exactly the same reason: the key is written verbatim,
+    // and a line whose *key* is itself a token (a mis-paste, or a continuation
+    // line of an unquoted multi-line value) would otherwise reach the
+    // committed file untouched. Brand-prefix-only, so legitimate placeholders
+    // like `https://example.com` are unaffected.
+    outputLines.push(
+      scanForSecrets(`${exportPrefix}${key}=${placeholders.get(i) ?? ""}`)
+    );
     emitted.add(key);
   }
 
@@ -511,7 +537,10 @@ export async function syncExample(
   try {
     tmpFd = openSync(tmpPath, tmpFlags);
   } catch (e: unknown) {
-    if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+    if ((e as NodeJS.ErrnoException).code !== "EEXIST") {
+      auditLog("sync_env_example", { status: "error" });
+      return { error: "Refusing to write .env.example: temp path is not writable" };
+    }
     try {
       // unlink removes the entry itself rather than following it; the O_EXCL
       // create then stays atomic against anything racing to recreate it.
@@ -530,6 +559,7 @@ export async function syncExample(
     closeSync(tmpFd);
   }
   renameSync(tmpPath, examplePath);
-  auditLog("sync_env_example", { keysAccessedCount: emitted.size, status: "success" });
-  return { path: examplePath, keys_synced: emitted.size };
+  const syncedCount = emitted.size - droppedFragments.size;
+  auditLog("sync_env_example", { keysAccessedCount: syncedCount, status: "success" });
+  return { path: examplePath, keys_synced: syncedCount };
 }

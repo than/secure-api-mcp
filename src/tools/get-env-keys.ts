@@ -25,9 +25,23 @@ export async function getEnvKeys(
   // dotenv turns the lines of an unquoted multi-line value into keys, so a
   // base64 fragment of a private key can arrive here as a key *name*. The tool
   // promises "no values are exposed"; one predicate, every exit.
-  const keys = Object.keys(env).filter(isPlausibleEnvKey);
+  const allKeys = Object.keys(env);
+  const keys = allKeys.filter(isPlausibleEnvKey);
+  const dropped = allKeys.filter((k) => !isPlausibleEnvKey(k));
   auditLog("get_env_keys", { keysAccessedCount: keys.length, status: "success" });
   // Distinguish "refused by policy" from "no keys here" — otherwise an empty
   // list reads as an empty .env.
-  return blocked ? { keys, warnings: [blocked] } : { keys };
+  // A filtered key must not look like a missing variable — for a real secret
+  // that is a functional break with no signal.
+  const warnings = [
+    ...(blocked ? [blocked] : []),
+    ...(dropped.length > 0
+      ? [
+          `Omitted ${dropped.length} key(s) that look like fragments of a ` +
+            `multi-line value rather than names. Check .env for an unquoted or ` +
+            `unterminated multi-line value.`,
+        ]
+      : []),
+  ];
+  return warnings.length > 0 ? { keys, warnings } : { keys };
 }

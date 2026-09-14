@@ -2,6 +2,7 @@ import { readFileSync, statSync, readdirSync, realpathSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, join, resolve, sep } from "node:path";
 import { parse } from "ini";
+import { isWithin } from "./utils/path.js";
 
 /**
  * MySQL honours a `loose-` prefix on any option, and my_getopt accepts either
@@ -84,12 +85,6 @@ function readFile(path: string): { content: string; mtime: number } | null {
 }
 
 /** True if `target` resolves to `root` or a path nested under it. */
-function isWithin(root: string, target: string): boolean {
-  const r = resolve(root);
-  const t = resolve(target);
-  return t === r || t.startsWith(r + sep);
-}
-
 /**
  * Canonical (symlink-resolved) path, or null if it can't be resolved (ENOENT).
  * Used for containment checks: a lexical `resolve()` does not follow symlinks,

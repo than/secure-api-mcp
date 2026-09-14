@@ -634,6 +634,46 @@ describe("syncExample - multi-line values", () => {
     expect(out).not.toContain("ZXhhbXBsZXNlY3JldA");
   });
 
+  it("drops a base64url fragment containing an underscore", async () => {
+    const project = tempProject();
+    // base64url's alphabet includes `_`, which is exactly what a "no
+    // underscore" rule would have let through.
+    writeFileSync(
+      join(project, ".env"),
+      'KEY="-----BEGIN-----\nZXhhbXBsZV9zZWNyZXRfdmFs=\n'
+    );
+
+    await syncExample({ project_dir: project });
+
+    expect(readFileSync(join(project, ".env.example"), "utf-8")).not.toContain(
+      "ZXhhbXBsZV9zZWNyZXRfdmFs"
+    );
+  });
+
+  it("scans the emitted assignment line, not just comments", async () => {
+    const project = tempProject();
+    // A line whose *key* is itself a brand-prefixed token.
+    const token = ["ghp", "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"].join("_");
+    writeFileSync(join(project, ".env"), `${token}=\nAPP_ENV=production\n`);
+
+    await syncExample({ project_dir: project });
+
+    expect(readFileSync(join(project, ".env.example"), "utf-8")).not.toContain(token);
+  });
+
+  it("does not count dropped fragments in keys_synced", async () => {
+    const project = tempProject();
+    writeFileSync(
+      join(project, ".env"),
+      'KEY="-----BEGIN-----\nZXhhbXBsZXNlY3JldA=\n'
+    );
+
+    const result = await syncExample({ project_dir: project });
+
+    // KEY was written; the fragment was not.
+    expect(result).toMatchObject({ keys_synced: 1 });
+  });
+
   it("drops a base64url tail containing a hyphen", async () => {
     const project = tempProject();
     writeFileSync(
