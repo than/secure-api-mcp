@@ -630,6 +630,23 @@ describe("syncExample - multi-line values", () => {
     expect(result).not.toHaveProperty("error");
   });
 
+  it("redacts a comment when a duplicate key was echoed under another value", async () => {
+    const project = tempProject();
+    // PORT=8080 is echoed verbatim (SAFE_NUMERIC_KEYS), but parse() keeps the
+    // last PORT — so keying suppression on the echoed occurrence dropped the
+    // live value from comment sanitization entirely.
+    writeFileSync(
+      join(project, ".env"),
+      "PORT=8080\nPORT=super_secret_value_here\n" +
+        "# see PORT=super_secret_value_here for the override\n"
+    );
+
+    await syncExample({ project_dir: project });
+    const out = readFileSync(join(project, ".env.example"), "utf-8");
+
+    expect(out).not.toContain("super_secret_value_here");
+  });
+
   it("keeps a punctuated shared default such as a timezone", async () => {
     const project = tempProject();
     writeFileSync(join(project, ".env"), "TZ=America/New_York\n");

@@ -200,7 +200,10 @@ function parseExistingExample(
     // ELOOP: a symlink, refused deliberately. Anything else (EACCES, a race
     // after existsSync) also means "no placeholders to reuse" — degrade to
     // regenerating them rather than throwing past the structured error
-    // contract every other failure here honours.
+    // contract every other failure here honours. Logged either way: a
+    // committed `.env.example -> .env` is one of the attacks this tool
+    // defends against, and blocking it should leave a record.
+    auditLog("sync_env_example", { status: "blocked" });
     return map;
   }
   let content: string;
@@ -393,7 +396,12 @@ export async function syncExample(
     if (!validKeys.has(a.key) || OPAQUE_TOKEN.test(a.key)) continue;
     const placeholder = placeholderFor(a);
     placeholders.set(a.startLine, placeholder);
-    if (unquote(placeholder) === unquote(a.value)) echoedKeys.add(a.key);
+    // Compare against the value comments are actually scrubbed against, not
+    // this occurrence's. parse() keeps only the last assignment for a repeated
+    // key, so keying on `a.value` let an echoed `PORT=8080` suppress
+    // redaction of a later `PORT=super_secret_value_here` — dropping the live
+    // value from commentValues entirely.
+    if (unquote(placeholder) === envValues[a.key]) echoedKeys.add(a.key);
   }
 
   // Redacting a value the file prints verbatim one line above would render
@@ -488,7 +496,7 @@ export async function syncExample(
   const disagreement = detectSpanDisagreement(assignments, envValues, emitted);
   if (disagreement !== null) {
     auditLog("sync_env_example", { status: "blocked" });
-    return { error: disagreement };
+    return { error: sanitize(disagreement, envValues) };
   }
 
   // The temp path is predictable, so a committed `.env.example.tmp` symlink
