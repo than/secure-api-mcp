@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { isAbsolute } from "node:path";
 import { loadEnvChecked } from "../env-loader.js";
-import { isPlausibleEnvKey } from "../utils/env-key.js";
+import { isPlausibleEnvKey, keyStub } from "../utils/env-key.js";
 import { validateProjectDir } from "../security/path-validator.js";
 import { auditLog } from "../security/audit.js";
 
@@ -38,8 +38,9 @@ export async function getEnvKeys(
     ...(dropped.length > 0
       ? [
           `Omitted ${dropped.length} key(s) that look like fragments of a ` +
-            `multi-line value rather than names. Check .env for an unquoted or ` +
-            `unterminated multi-line value.`,
+            `multi-line value rather than names: ${dropped.map(keyStub).join(", ")}. ` +
+            `Check .env for an unquoted or unterminated multi-line value. If one ` +
+            `is a real key, pass it to run_with_env via env_keys.`,
         ]
       : []),
   ];

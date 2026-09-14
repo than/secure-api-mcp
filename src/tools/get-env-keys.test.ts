@@ -38,9 +38,11 @@ describe("getEnvKeys", () => {
 
     expect(result).toMatchObject({ keys: ["PRIVATE_KEY"] });
     // Dropping it silently would read as a missing variable.
-    expect((result as { warnings?: string[] }).warnings?.join(" ")).toMatch(
-      /fragments of a/
-    );
+    const warning = (result as { warnings?: string[] }).warnings?.join(" ") ?? "";
+    expect(warning).toMatch(/fragments of a/);
+    // Named enough to recognize, not enough to be a usable fragment.
+    expect(warning).toContain("QUJDREVG…");
+    expect(warning).not.toContain("QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVowMTIzNDU2Nzg5");
   });
 
   it("keeps a dotted key that is not a fragment", async () => {

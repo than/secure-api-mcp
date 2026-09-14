@@ -716,6 +716,40 @@ describe("syncExample - multi-line values", () => {
     expect(out).not.toContain("super_secret_value_here");
   });
 
+  it("regenerates a stored placeholder holding another key's live secret", async () => {
+    const project = tempProject();
+    // The leak sits under the wrong key: APP_NAME clears SECRET_KEY_TOKENS,
+    // the scanner, hasUrlCredentials and OPAQUE_TOKEN, and is unequal to its
+    // own live value — so every same-key gate passes.
+    writeFileSync(
+      join(project, ".env"),
+      "DB_PASSWORD=correct-horse-battery\nAPP_NAME=myapp\n"
+    );
+    writeFileSync(join(project, ".env.example"), "APP_NAME=correct-horse-battery\n");
+
+    await syncExample({ project_dir: project });
+    const out = readFileSync(join(project, ".env.example"), "utf-8");
+
+    expect(out).not.toContain("correct-horse-battery");
+  });
+
+  it("keeps a default shared legitimately between two keys", async () => {
+    const project = tempProject();
+    // Both hold `production`; excluding this key's own value from the
+    // cross-key check is what stops it being blanked.
+    writeFileSync(join(project, ".env"), "APP_ENV=production\nNODE_ENV=production\n");
+    writeFileSync(
+      join(project, ".env.example"),
+      "APP_ENV=production\nNODE_ENV=production\n"
+    );
+
+    await syncExample({ project_dir: project });
+    const out = readFileSync(join(project, ".env.example"), "utf-8");
+
+    expect(out).toContain("APP_ENV=production");
+    expect(out).toContain("NODE_ENV=production");
+  });
+
   it("keeps a punctuated shared default such as a timezone", async () => {
     const project = tempProject();
     writeFileSync(join(project, ".env"), "TZ=America/New_York\n");

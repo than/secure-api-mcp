@@ -376,6 +376,12 @@ export async function syncExample(
     const existingEntry = existing.get(key);
     const storedPlaceholder = unquote(existingEntry?.placeholder ?? "");
     const generated = smartPlaceholder(key, bareValue);
+    // Excluding this key's own value keeps the documented residual: a
+    // legitimately shared default (APP_ENV=production beside
+    // NODE_ENV=production) must not be blanked.
+    const otherValues = Object.fromEntries(
+      Object.entries(envValues).filter(([k, v]) => k !== key && v !== bareValue)
+    );
 
     // Reuse a curated placeholder from an existing .env.example, but NEVER for
     // a key that names a secret. An earlier (buggy) run may have written the
@@ -385,7 +391,14 @@ export async function syncExample(
     const reusable =
       existingEntry !== undefined &&
       !SECRET_KEY_TOKENS.test(key) &&
-      scanForSecrets(storedPlaceholder) === storedPlaceholder &&
+      // Check the stored placeholder against *every other* live value, not just
+      // this key's. A leaked secret sitting under the wrong key — a stored
+      // `APP_NAME=<the live DB_PASSWORD>` — cleared every gate: the key regex
+      // does not name it, no brand prefix, not a URL, not opaque, and it is
+      // unequal to APP_NAME's own value. safeComment already applies exactly
+      // this treatment for the same reason; the assignment path had the weaker
+      // check. sanitize ends with scanForSecrets, so this subsumes it.
+      sanitize(storedPlaceholder, otherValues) === storedPlaceholder &&
       !hasUrlCredentials(storedPlaceholder) &&
       // An opaque stored placeholder is a leaked value even after the live one
       // rotates, so this does not depend on equality.

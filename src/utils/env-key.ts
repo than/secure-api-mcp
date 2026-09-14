@@ -19,3 +19,14 @@ export const VALUE_FRAGMENT_KEY = /^(?=.*[a-z])(?=.*[A-Z])[\w.-]{16,}$/;
 export function isPlausibleEnvKey(key: string): boolean {
   return !VALUE_FRAGMENT_KEY.test(key);
 }
+
+/**
+ * A recognizable stub for an omitted key. Naming an omitted key in full would
+ * re-expose the fragment the filter exists to hide, but a caller who lost a
+ * legitimate camelCase key needs enough to recognize it and pass `env_keys`
+ * explicitly. Eight characters identifies `databaseConnectio…` without
+ * yielding anything usable from `QUJDREVG…`.
+ */
+export function keyStub(key: string): string {
+  return key.length <= 8 ? key : `${key.slice(0, 8)}…`;
+}
