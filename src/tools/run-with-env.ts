@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { isAbsolute } from "node:path";
 import { execFile } from "node:child_process";
-import { loadEnv } from "../env-loader.js";
+import { loadEnvChecked } from "../env-loader.js";
 import { loadMyCnf } from "../mycnf-loader.js";
 import { homedir } from "node:os";
 import { sanitize } from "../utils/sanitize.js";
@@ -88,7 +88,12 @@ export async function runWithEnv(
 
   const warnings = detectCommandWarnings(args.command);
 
-  const env = loadEnv(args.project_dir);
+  // A policy refusal must be visible here too. The env is {} either way, so
+  // nothing is injected — but sanitizeSecrets is also {}, meaning a command
+  // that reads the symlinked .env itself (`cat .env`) gets unredacted output
+  // where it would previously have been scrubbed.
+  const { env, blocked: envBlocked } = loadEnvChecked(args.project_dir);
+  if (envBlocked) warnings.push(envBlocked);
 
   // Build combined secret map for sanitization
   let sanitizeSecrets: Record<string, string> = env;

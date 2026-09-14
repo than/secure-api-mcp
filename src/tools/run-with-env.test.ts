@@ -1,16 +1,21 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { loadEnv } from "../env-loader.js";
+import { loadEnvChecked } from "../env-loader.js";
 import { loadMyCnf } from "../mycnf-loader.js";
 import { validateProjectDir } from "../security/path-validator.js";
 import { auditLog } from "../security/audit.js";
 import { RunWithEnvSchema } from "./run-with-env.js";
 
-vi.mock("../env-loader.js", () => ({ loadEnv: vi.fn() }));
+vi.mock("../env-loader.js", () => ({ loadEnvChecked: vi.fn() }));
 vi.mock("../mycnf-loader.js", () => ({ loadMyCnf: vi.fn() }));
 vi.mock("../security/path-validator.js", () => ({ validateProjectDir: vi.fn() }));
 vi.mock("../security/audit.js", () => ({ auditLog: vi.fn() }));
 
-const mockLoadEnv = vi.mocked(loadEnv);
+const mockLoadEnvChecked = vi.mocked(loadEnvChecked);
+/** loadEnvChecked returns { env, blocked? }; tests only ever set env. */
+const mockLoadEnv = {
+  mockReturnValue: (env: Record<string, string>) =>
+    mockLoadEnvChecked.mockReturnValue({ env }),
+};
 const mockLoadMyCnf = vi.mocked(loadMyCnf);
 const mockValidateProjectDir = vi.mocked(validateProjectDir);
 

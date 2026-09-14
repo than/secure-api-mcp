@@ -87,12 +87,14 @@ function unquote(v: string): string {
 }
 
 /**
- * Values safe to keep when the stored placeholder is byte-identical to the
- * live one: short, word-shaped, no separators — `production`, `debug`, `info`.
- * An opaque token (`8f3a9c2e1b7d40561122`) or anything longer is assumed to be
- * the leaked value itself.
+ * Looks like an opaque credential: long, alphanumeric-only, mixing letters and
+ * digits — `8f3a9c2e1b7d40561122`. A stored placeholder of this shape is the
+ * leaked value whether or not the live one has since rotated, so equality with
+ * `.env` is not required to reject it. Punctuated config (`America/New_York`,
+ * `https://app.example.com`, `--max-old-space-size=4096`) is excluded, so a
+ * legitimately shared default still survives.
  */
-const ECHOABLE_VALUE = /^[a-z0-9][a-z0-9._-]{0,15}$/i;
+const OPAQUE_TOKEN = /^(?=.*\d)(?=.*[a-zA-Z])[A-Za-z0-9]{20,}$/;
 
 /** Screaming snake with at least one underscore — `DB_PASSWORD`, not `TODO`. */
 const ENV_VAR_SHAPED = /^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$/;
@@ -244,8 +246,14 @@ export function detectSpanDisagreement(
     if (a.endLine > a.startLine) continue;
     const parsed = envValues[a.key];
     if (parsed === undefined || !parsed.includes("\n")) continue;
-    // A single-line `KEY="a\nb"` expands to a real newline; not a narrowing.
-    if (/\\[nr]/.test(a.value)) continue;
+    // A single-line `KEY="a\nb"` expands to real newlines, so compare counts
+    // rather than skipping the check whenever the value contains an escape —
+    // that escape hatch was controlled by whoever writes `.env`, and this
+    // backstop exists precisely for the case where the copied regex has
+    // drifted from the installed dotenv.
+    const escaped = (a.value.match(/\\n/g) ?? []).length;
+    const actual = (parsed.match(/\n/g) ?? []).length;
+    if (actual <= escaped) continue;
     return (
       `Refusing to write .env.example: the value of ${a.key} spans lines per ` +
       `dotenv but was scanned as one line. The parser and the span scan ` +
@@ -347,7 +355,14 @@ export async function syncExample(
       // one we actually know or one the deny-first gate names.
       const known = validKeys.has(key) || SECRET_KEY_TOKENS.test(key);
       if ((ENV_VAR_SHAPED.test(key) || known) && (separator.includes("=") || known)) {
-        return `${hash}${rawKey}${separator}${smartPlaceholder(key, rawValue.trim())}`;
+        // Sanitize the whole line, not just the value: rawKey is emitted
+        // verbatim, and a screaming-snake-shaped secret used as a commented
+        // key would otherwise reach the committed file untouched. Keeps
+        // "every exit path" a property of the function, not a case analysis.
+        return sanitize(
+          `${hash}${rawKey}${separator}${smartPlaceholder(key, rawValue.trim())}`,
+          envValues
+        );
       }
     }
     // sanitize ends with scanForSecrets itself; calling it first would tag a
@@ -394,15 +409,16 @@ export async function syncExample(
       // credentials, is a leaked value from an earlier run — regenerate.
       scanForSecrets(storedPlaceholder) === storedPlaceholder &&
       !hasUrlCredentials(storedPlaceholder) &&
-      // A stored copy byte-identical to the live value IS that value. An empty
-      // `generated` is not "no opinion" — it is smartPlaceholder's strongest
-      // refusal, so requiring a non-empty one here would permit reuse exactly
-      // where the tool has judged the value unsafe to echo. Test the value
-      // shape instead: keep a curated `APP_ENV=production`, regenerate an
-      // opaque `MAILGUN_SENDING=8f3a9c2e1b7d40561122` and a quoted
-      // `DATABASE_URL="postgres://admin:s3cret@host/db"`, neither of which
-      // SECRET_KEY_TOKENS or the scanner names.
-      (storedPlaceholder !== bareValue || ECHOABLE_VALUE.test(bareValue));
+      // An opaque stored placeholder is a leaked value even after the live one
+      // rotates, so this does not depend on equality.
+      !OPAQUE_TOKEN.test(storedPlaceholder) &&
+      // Byte-identical to the live value IS that value — regenerate whenever
+      // this tool has a substitute of its own that differs, which is what
+      // catches SLACK_WEBHOOK=https://hooks.slack.com/services/... while
+      // leaving a curated APP_ENV=production and TZ=America/New_York intact.
+      (storedPlaceholder !== bareValue ||
+        generated === "" ||
+        generated === bareValue);
     const placeholder = reusable ? existingEntry!.placeholder : generated;
 
     // Preserve any custom comment from existing .env.example

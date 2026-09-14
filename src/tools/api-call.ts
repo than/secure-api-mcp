@@ -138,7 +138,7 @@ export async function apiCall(
   // Surface a policy refusal from loadEnv rather than letting it look like an
   // absent .env: without this the request goes out unauthenticated and the
   // caller sees only a bare 401.
-  if (envBlocked) warnings.push(envBlocked);
+  if (envBlocked) warnings.push(sanitize(envBlocked, env));
   const policy = getHostPolicy();
   const checkDestination = (host: string): string | null => {
     if (injectedKeys.size === 0) return null;

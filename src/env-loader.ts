@@ -58,7 +58,11 @@ export function loadEnvChecked(projectDir: string): LoadEnvResult {
             ".env is a symlink pointing outside the project directory; refusing to read it",
         };
       }
-      fd = openSync(realEnv, constants.O_RDONLY);
+      // realpath output has no symlink final component, so O_NOFOLLOW costs
+      // nothing — and it rejects a re-plant in the realpath-to-open window
+      // rather than following it. `.env -> ./config/local.env` is a permitted
+      // layout and ./config/ is repo-controlled.
+      fd = openSync(realEnv, constants.O_RDONLY | constants.O_NOFOLLOW);
     }
     try {
       content = readFileSync(fd, "utf-8");

@@ -559,6 +559,43 @@ describe("syncExample - multi-line values", () => {
     expect(out).not.toContain("8f3a9c2e1b7d40561122");
   });
 
+  it("regenerates an opaque stored token even after the live value rotated", async () => {
+    const project = tempProject();
+    // Equality no longer carries the decision: the stored shape does.
+    writeFileSync(join(project, ".env"), "MAILGUN_SENDING=aa11bb22cc33dd44ee55ff66\n");
+    writeFileSync(join(project, ".env.example"), "MAILGUN_SENDING=8f3a9c2e1b7d40561122\n");
+
+    await syncExample({ project_dir: project });
+    const out = readFileSync(join(project, ".env.example"), "utf-8");
+
+    expect(out).not.toContain("8f3a9c2e1b7d40561122");
+  });
+
+  it("keeps a punctuated shared default such as a timezone", async () => {
+    const project = tempProject();
+    writeFileSync(join(project, ".env"), "TZ=America/New_York\n");
+    writeFileSync(join(project, ".env.example"), "TZ=America/New_York\n");
+
+    await syncExample({ project_dir: project });
+
+    expect(readFileSync(join(project, ".env.example"), "utf-8")).toContain(
+      "TZ=America/New_York"
+    );
+  });
+
+  it("sanitizes a live secret used as a commented-out key", async () => {
+    const project = tempProject();
+    writeFileSync(
+      join(project, ".env"),
+      "TOKEN=SOME_SECRET_VALUE_HERE\n# SOME_SECRET_VALUE_HERE=x\n"
+    );
+
+    await syncExample({ project_dir: project });
+    const out = readFileSync(join(project, ".env.example"), "utf-8");
+
+    expect(out).not.toContain("# SOME_SECRET_VALUE_HERE=");
+  });
+
   it("keeps a quoted port rather than blanking it", async () => {
     const project = tempProject();
     writeFileSync(join(project, ".env"), 'PORT="3000"\n');
