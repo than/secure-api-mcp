@@ -33,6 +33,10 @@
 - `read_mycnf` reuses the loader's `secrets` map rather than re-deriving which fields are sensitive, so one predicate decides what the model sees.
 - `api_call` sanitizes `warnings` as well as `body`. Warnings ride along on every exit path, and one entry interpolates a `Location`-derived hostname, so the same reflection channel reached the model unsanitized.
 
+- `api_call` drops injected secrets on a cross-origin redirect. `Authorization` and any header carrying an injected value were forwarded verbatim to whatever host the remote server named in `Location`, and with `SECURE_API_ALLOWED_HOSTS` unset — the documented default — the destination check only warns. curl and browsers strip `Authorization` on cross-origin redirect for the same reason; the allowlist is now a narrowing control rather than the only one.
+- `get_env_keys` and `run_with_env` filter out keys that are value fragments. dotenv turns each line of an unquoted multi-line value into its own assignment, so a base64 chunk of a private key arrived as a key *name* — reaching the model despite "no values are exposed", and becoming a child-process variable name under `run_with_env`.
+- `api_call` reads the response body inside its `try`. The read sat after the `finally`, so `timeout_ms` bounded time-to-headers only and a trickled body stalled indefinitely, while a mid-stream reset rejected past every `sanitize` call, past `auditLog`, and past the warnings.
+
 ### Changed
 
 - `loadEnv` refuses a `.env` symlinked outside the project. A monorepo or dotfiles layout pointing `.env` at a shared file outside the tree stops resolving; a symlink within the project still works. `api_call` and `get_env_keys` surface the refusal as a warning; `run_with_env` refuses outright, because with the read blocked its sanitizer map is empty and a command reading the symlink itself would get output the previous code scrubbed.

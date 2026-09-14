@@ -185,6 +185,7 @@ export async function apiCall(
         });
 
   let response: Response;
+  let bodyText: string;
   let currentUrl = args.url;
   let currentIp = urlCheck.resolvedIp;
   let method: string = args.method;
@@ -258,10 +259,48 @@ export async function apiCall(
         };
       }
 
+      // Drop injected secrets on a cross-origin hop, independently of the
+      // allowlist. The first hop's destination was chosen by the model; a
+      // redirect target is attacker-controlled response data, and with
+      // SECURE_API_ALLOWED_HOSTS unset — the documented default —
+      // checkDestination only warns. curl and browsers strip Authorization on
+      // cross-origin redirect for exactly this reason. This makes the
+      // allowlist a narrowing control rather than the only control.
+      if (new URL(nextUrl).origin !== new URL(currentUrl).origin) {
+        const dropped: string[] = [];
+        for (const name of Object.keys(headers)) {
+          if (name.toLowerCase() === "authorization") {
+            delete headers[name];
+            dropped.push(name);
+          }
+        }
+        for (const [name, value] of Object.entries(headers)) {
+          if ([...injectedKeys].some((k) => env[k] && value.includes(env[k]))) {
+            delete headers[name];
+            dropped.push(name);
+          }
+        }
+        if (dropped.length > 0) {
+          warnings.push(
+            sanitize(
+              `Dropped ${dropped.join(", ")} on cross-origin redirect to ` +
+                `'${new URL(nextUrl).hostname}'; secrets are not forwarded to a ` +
+                `host the remote server chose.`,
+              env
+            )
+          );
+        }
+      }
+
       ({ method, body } = redirectedRequest(response.status, method, body));
       currentUrl = nextUrl;
       currentIp = nextCheck.resolvedIp;
     }
+    // Read the body inside the try. Outside it the timer has already been
+    // cleared — so timeout_ms bounded time-to-headers only and a trickled body
+    // stalled indefinitely — and a mid-stream reset rejected past every
+    // sanitize call, past auditLog, and past the warnings.
+    bodyText = await response.text();
   } catch (err) {
     auditLog("api_call", { status: "error" });
     const message =
@@ -280,7 +319,6 @@ export async function apiCall(
     clearTimeout(timer);
   }
 
-  const bodyText = await response.text();
   const responseHeaders: Record<string, string> = {};
   response.headers.forEach((value, key) => {
     // Names as well as values: HTTP token characters cover most secret

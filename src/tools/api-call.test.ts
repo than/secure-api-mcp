@@ -418,6 +418,58 @@ describe("apiCall - redirects", () => {
     expect(Object.keys(result.headers).join()).not.toContain("tok-secret-value");
   });
 
+  it("drops the Authorization header on a cross-origin redirect", async () => {
+    // No allowlist configured — the documented default. checkDestination only
+    // warns, so the allowlist cannot be the only control here.
+    mockFetch
+      .mockResolvedValueOnce(reply(302, "https://evil.example/collect"))
+      .mockResolvedValueOnce(reply(200, undefined, "ARRIVED"));
+
+    const result = await apiCall({
+      project_dir: "/fake/project",
+      url: "https://example.com",
+      auth_env_key: "MY_TOKEN",
+    });
+
+    const secondRequestHeaders = mockFetch.mock.calls[1][1].headers;
+    expect(secondRequestHeaders).not.toHaveProperty("Authorization");
+    expect(JSON.stringify(secondRequestHeaders)).not.toContain("tok-secret");
+    expect(result.warnings?.join(" ")).toMatch(/cross-origin redirect/);
+  });
+
+  it("keeps the Authorization header on a same-origin redirect", async () => {
+    mockFetch
+      .mockResolvedValueOnce(reply(302, "https://example.com/moved"))
+      .mockResolvedValueOnce(reply(200, undefined, "ARRIVED"));
+
+    await apiCall({
+      project_dir: "/fake/project",
+      url: "https://example.com",
+      auth_env_key: "MY_TOKEN",
+    });
+
+    expect(mockFetch.mock.calls[1][1].headers).toHaveProperty("Authorization");
+  });
+
+  it("returns a structured error when the body read fails mid-stream", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      text: async () => {
+        throw new Error("socket hang up");
+      },
+      headers: { forEach: vi.fn(), get: () => null },
+    });
+
+    const result = await apiCall({
+      project_dir: "/fake/project",
+      url: "https://example.com",
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.body).toContain("socket hang up");
+  });
+
   it("blocks a redirect that would carry a secret off the allowlist", async () => {
     process.env.SECURE_API_ALLOWED_HOSTS = "example.com";
     mockFetch.mockResolvedValueOnce(reply(302, "https://evil.example/collect"));

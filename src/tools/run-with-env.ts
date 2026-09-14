@@ -2,6 +2,7 @@ import { z } from "zod";
 import { isAbsolute } from "node:path";
 import { execFile } from "node:child_process";
 import { loadEnvChecked } from "../env-loader.js";
+import { isPlausibleEnvKey } from "../utils/env-key.js";
 import { loadMyCnf } from "../mycnf-loader.js";
 import { homedir } from "node:os";
 import { sanitize } from "../utils/sanitize.js";
@@ -113,7 +114,10 @@ export async function runWithEnv(
 
   // Filter to requested keys if specified
   const injectedEnv: Record<string, string> = {};
-  const keys = args.env_keys ?? Object.keys(env);
+  // With env_keys unset the default is "everything", which would turn a
+  // value fragment dotenv mistook for a key into a child-process variable
+  // name. An explicit env_keys is the caller's own choice and is left alone.
+  const keys = args.env_keys ?? Object.keys(env).filter(isPlausibleEnvKey);
   for (const key of keys) {
     if (key in env) {
       injectedEnv[key] = env[key];

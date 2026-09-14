@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { validateProjectDir } from "../security/path-validator.js";
 import { auditLog } from "../security/audit.js";
 import { sanitize } from "../utils/sanitize.js";
+import { VALUE_FRAGMENT_KEY, isWithin } from "../utils/env-key.js";
 import { O_NOFOLLOW, refuseSymlink } from "../security/nofollow.js";
 import { scanForSecrets } from "../security/scanner.js";
 import { parse } from "dotenv";
@@ -96,18 +97,6 @@ function unquote(v: string): string {
  * legitimately shared default still survives.
  */
 const OPAQUE_TOKEN = /^(?=.*\d)(?=.*[a-zA-Z])[A-Za-z0-9]{20,}$/;
-
-/**
- * A "key" of this shape with an empty value is a fragment of a value, not a
- * key. A multi-line value that is unquoted — or quoted in a way dotenv resolves
- * to its unquoted branch — leaves each following line scanned on its own, and a
- * base64 line whose only non-word character is its trailing `=` tokenizes as
- * `KEY=`. The tell is length without an underscore: real env var names of 16+
- * characters effectively always carry one, and base64/base64url bodies never
- * do. Deliberately not `OPAQUE_TOKEN`, which needs a digit and 20 characters —
- * the padded tail of a PEM is short and often digit-free.
- */
-const VALUE_FRAGMENT_KEY = /^[A-Za-z0-9.-]{16,}$/;
 
 /** Screaming snake with at least one underscore — `DB_PASSWORD`, not `TODO`. */
 const ENV_VAR_SHAPED = /^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$/;
@@ -201,14 +190,19 @@ function parseExistingExample(
   try {
     refuseSymlink(path);
     fd = openSync(path, constants.O_RDONLY | O_NOFOLLOW);
-  } catch {
+  } catch (e: unknown) {
     // ELOOP: a symlink, refused deliberately. Anything else (EACCES, a race
     // after existsSync) also means "no placeholders to reuse" — degrade to
     // regenerating them rather than throwing past the structured error
     // contract every other failure here honours. Logged either way: a
     // committed `.env.example -> .env` is one of the attacks this tool
     // defends against, and blocking it should leave a record.
-    auditLog("sync_env_example", { status: "blocked" });
+    // Distinguish the refusal from benign open failures, or a committed
+    // `.env.example -> .env` — one of the attacks this tool defends against —
+    // is logged identically to an EACCES and gets lost in the noise.
+    auditLog("sync_env_example", {
+      status: (e as NodeJS.ErrnoException).code === "ELOOP" ? "blocked" : "error",
+    });
     return map;
   }
   let content: string;
@@ -328,7 +322,7 @@ export async function syncExample(
     // .env is a symlink — block if it resolves outside the project
     const realEnv = realpathSync(envPath);
     const realProject = realpathSync(args.project_dir);
-    if (!realEnv.startsWith(realProject + "/") && realEnv !== realProject) {
+    if (!isWithin(realProject, realEnv)) {
       auditLog("sync_env_example", { status: "blocked" });
       return { error: "Refusing to read .env: symlink points outside project directory" };
     }

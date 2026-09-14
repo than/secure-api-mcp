@@ -1,5 +1,6 @@
 import { readFileSync, statSync, openSync, closeSync, realpathSync, constants } from "node:fs";
 import { O_NOFOLLOW, refuseSymlink } from "./security/nofollow.js";
+import { isWithin } from "./utils/env-key.js";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { parse } from "dotenv";
@@ -48,7 +49,7 @@ export function loadEnvChecked(projectDir: string): LoadEnvResult {
       // A symlink — allow it only if it resolves inside the project.
       const realEnv = realpathSync(envPath);
       const realProject = realpathSync(projectDir);
-      if (!realEnv.startsWith(realProject + "/") && realEnv !== realProject) {
+      if (!isWithin(realProject, realEnv)) {
         auditLog("load_env", { status: "blocked" });
         return {
           env: {},
