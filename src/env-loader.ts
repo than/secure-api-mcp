@@ -1,11 +1,9 @@
-import { readFileSync, statSync, openSync, closeSync, realpathSync, lstatSync, constants } from "node:fs";
+import { readFileSync, statSync, openSync, closeSync, realpathSync, constants } from "node:fs";
+import { O_NOFOLLOW, refuseSymlink } from "./security/nofollow.js";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { parse } from "dotenv";
 import { auditLog } from "./security/audit.js";
-
-/** See sync-example.ts: O_NOFOLLOW is POSIX-only and coerces to 0 elsewhere. */
-const O_NOFOLLOW = constants.O_NOFOLLOW ?? 0;
 
 export interface LoadEnvResult {
   env: Record<string, string>;
@@ -20,10 +18,6 @@ interface CacheEntry {
 }
 
 const cache = new Map<string, CacheEntry>();
-
-export function loadEnv(projectDir: string): Record<string, string> {
-  return loadEnvChecked(projectDir).env;
-}
 
 /**
  * As `loadEnv`, but distinguishes "refused by policy" from "no .env here".
@@ -47,11 +41,7 @@ export function loadEnvChecked(projectDir: string): LoadEnvResult {
   try {
     let fd: number;
     try {
-      if (O_NOFOLLOW === 0 && lstatSync(envPath, { throwIfNoEntry: false })?.isSymbolicLink()) {
-        const err = new Error("ELOOP") as NodeJS.ErrnoException;
-        err.code = "ELOOP";
-        throw err;
-      }
+      refuseSymlink(envPath);
       fd = openSync(envPath, constants.O_RDONLY | O_NOFOLLOW);
     } catch (e: unknown) {
       if ((e as NodeJS.ErrnoException).code !== "ELOOP") throw e;

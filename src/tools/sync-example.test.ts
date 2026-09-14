@@ -600,6 +600,36 @@ describe("syncExample - multi-line values", () => {
     expect(out).not.toContain("zulu-charlie-whiskey-42");
   });
 
+  it("drops a base64 fragment that tokenizes as a key", async () => {
+    const project = tempProject();
+    // Unquoted multi-line value: dotenv scans each line on its own, and a
+    // base64 line whose only non-word character is its trailing `=` becomes a
+    // key. That "key" is a fragment of the private key.
+    const fragment = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVowMTIzNDU2Nzg5";
+    writeFileSync(
+      join(project, ".env"),
+      `PRIVATE_KEY=-----BEGIN RSA PRIVATE KEY-----\n${fragment}=\n-----END RSA PRIVATE KEY-----\n`
+    );
+
+    const result = await syncExample({ project_dir: project });
+    const out = readFileSync(join(project, ".env.example"), "utf-8");
+
+    expect(out).not.toContain(fragment);
+    // Dropping it must not read as a lost key and refuse the whole write.
+    expect(result).not.toHaveProperty("error");
+  });
+
+  it("does not refuse when an earlier duplicate is single-line", async () => {
+    const project = tempProject();
+    // parse() keeps only the last FOO, so comparing the first against it
+    // reports a disagreement that does not exist.
+    writeFileSync(join(project, ".env"), 'FOO=a\nFOO="x\ny"\n');
+
+    const result = await syncExample({ project_dir: project });
+
+    expect(result).not.toHaveProperty("error");
+  });
+
   it("keeps a punctuated shared default such as a timezone", async () => {
     const project = tempProject();
     writeFileSync(join(project, ".env"), "TZ=America/New_York\n");

@@ -22,22 +22,22 @@ afterEach(() => {
 
 describe("loadEnv - basic", () => {
   it("returns empty object when .env does not exist", async () => {
-    const { loadEnv } = await import("./env-loader.js");
+    const { loadEnvChecked } = await import("./env-loader.js");
     const dir = tempDir();
-    expect(loadEnv(dir)).toEqual({});
+    expect(loadEnvChecked(dir).env).toEqual({});
   });
 
   it("parses key=value pairs from .env", async () => {
-    const { loadEnv } = await import("./env-loader.js");
+    const { loadEnvChecked } = await import("./env-loader.js");
     const dir = tempDir();
     writeFileSync(join(dir, ".env"), "API_KEY=secret\nPORT=3000\n");
-    expect(loadEnv(dir)).toEqual({ API_KEY: "secret", PORT: "3000" });
+    expect(loadEnvChecked(dir).env).toEqual({ API_KEY: "secret", PORT: "3000" });
   });
 });
 
 describe("loadEnv - stale cache (mtime collision)", () => {
   it("returns updated values when content changes but mtime is identical", async () => {
-    const { loadEnv } = await import("./env-loader.js");
+    const { loadEnvChecked } = await import("./env-loader.js");
     const dir = tempDir();
     const envPath = join(dir, ".env");
 
@@ -47,7 +47,7 @@ describe("loadEnv - stale cache (mtime collision)", () => {
 
     writeFileSync(envPath, "API_KEY=original\n");
     utimesSync(envPath, fixedTime, fixedTime);
-    const first = loadEnv(dir);
+    const first = loadEnvChecked(dir).env;
     expect(first.API_KEY).toBe("original");
 
     // Same mtime, different content — simulates coarse-clock / touch -t attack
@@ -55,21 +55,21 @@ describe("loadEnv - stale cache (mtime collision)", () => {
     utimesSync(envPath, fixedTime, fixedTime);
 
     // Must NOT serve stale cached value
-    const second = loadEnv(dir);
+    const second = loadEnvChecked(dir).env;
     expect(second.API_KEY).toBe("rotated");
   });
 });
 
 describe("loadEnv - symlink handling", () => {
   it("refuses a .env symlinked outside the project", async () => {
-    const { loadEnv } = await import("./env-loader.js");
+    const { loadEnvChecked } = await import("./env-loader.js");
     const project = tempDir();
     const outside = tempDir();
     const secrets = join(outside, "credentials");
     writeFileSync(secrets, "AWS_SECRET_ACCESS_KEY=live-secret-value\n");
     symlinkSync(secrets, join(project, ".env"));
 
-    expect(loadEnv(project)).toEqual({});
+    expect(loadEnvChecked(project).env).toEqual({});
   });
 
   it("reports the refusal rather than looking like a missing .env", async () => {
@@ -90,11 +90,11 @@ describe("loadEnv - symlink handling", () => {
   });
 
   it("still reads a .env symlinked within the project", async () => {
-    const { loadEnv } = await import("./env-loader.js");
+    const { loadEnvChecked } = await import("./env-loader.js");
     const project = tempDir();
     writeFileSync(join(project, ".env.local"), "APP_ENV=production\n");
     symlinkSync(join(project, ".env.local"), join(project, ".env"));
 
-    expect(loadEnv(project)).toEqual({ APP_ENV: "production" });
+    expect(loadEnvChecked(project).env).toEqual({ APP_ENV: "production" });
   });
 });

@@ -93,7 +93,16 @@ export async function runWithEnv(
   // that reads the symlinked .env itself (`cat .env`) gets unredacted output
   // where it would previously have been scrubbed.
   const { env, blocked: envBlocked } = loadEnvChecked(args.project_dir);
-  if (envBlocked) warnings.push(envBlocked);
+  if (envBlocked) {
+    // Refuse rather than warn. With the read blocked, sanitizeSecrets is empty,
+    // so a command that reads the symlink itself (`cat .env`) would get output
+    // the pre-refusal code scrubbed — refusing the read would strictly reduce
+    // redaction coverage. Nothing is injected either way, so the run has no
+    // reason to proceed. api_call and get_env_keys still warn: a request and a
+    // key listing remain meaningful without secrets.
+    auditLog("run_with_env", { status: "blocked" });
+    return { error: envBlocked };
+  }
 
   // Build combined secret map for sanitization
   let sanitizeSecrets: Record<string, string> = env;

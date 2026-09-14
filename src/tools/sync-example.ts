@@ -1,10 +1,11 @@
 import { z } from "zod";
 import { isAbsolute } from "node:path";
-import { readFileSync, writeFileSync, existsSync, realpathSync, lstatSync, openSync, closeSync, renameSync, unlinkSync, constants } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, realpathSync, openSync, closeSync, renameSync, unlinkSync, constants } from "node:fs";
 import { join } from "node:path";
 import { validateProjectDir } from "../security/path-validator.js";
 import { auditLog } from "../security/audit.js";
 import { sanitize } from "../utils/sanitize.js";
+import { O_NOFOLLOW, refuseSymlink } from "../security/nofollow.js";
 import { scanForSecrets } from "../security/scanner.js";
 import { parse } from "dotenv";
 
@@ -77,17 +78,6 @@ const DOTENV_LINE =
  * reintroduces the TOCTOU window the flag closes, but a narrow window beats no
  * control at all.
  */
-const O_NOFOLLOW = constants.O_NOFOLLOW ?? 0;
-
-function refuseSymlink(path: string): void {
-  if (O_NOFOLLOW !== 0) return;
-  if (lstatSync(path, { throwIfNoEntry: false })?.isSymbolicLink()) {
-    const err = new Error("ELOOP") as NodeJS.ErrnoException;
-    err.code = "ELOOP";
-    throw err;
-  }
-}
-
 /** Single-line `KEY=value`, for reading this tool's own output back. */
 const SINGLE_ASSIGN = /^\s*(export\s+)?([\w.-]+)(?:\s*=\s*?|:\s+?)/;
 
@@ -263,7 +253,13 @@ export function detectSpanDisagreement(
   envValues: Record<string, string>,
   emitted: Set<string>
 ): string | null {
-  for (const a of assignments) {
+  // parse() retains only the last occurrence of a repeated key, so only the
+  // last assignment for each key is comparable against it. Checking an earlier
+  // one reports a disagreement that does not exist.
+  const lastPerKey = new Map<string, Assignment>();
+  for (const a of assignments) lastPerKey.set(a.key, a);
+
+  for (const a of lastPerKey.values()) {
     const parsed = envValues[a.key];
     if (parsed === undefined) continue;
     // Compare the lines the span claims against the newlines the parsed value
@@ -394,7 +390,7 @@ export async function syncExample(
   const placeholders = new Map<number, string>();
   const echoedKeys = new Set<string>();
   for (const a of assignments) {
-    if (!validKeys.has(a.key)) continue;
+    if (!validKeys.has(a.key) || OPAQUE_TOKEN.test(a.key)) continue;
     const placeholder = placeholderFor(a);
     placeholders.set(a.startLine, placeholder);
     if (unquote(placeholder) === unquote(a.value)) echoedKeys.add(a.key);
@@ -462,6 +458,19 @@ export async function syncExample(
 
     const { key, exportPrefix } = assignment;
     if (!validKeys.has(key)) continue;
+    // An unquoted or unterminated multi-line value leaves dotenv scanning each
+    // following line on its own, and a base64 line whose only non-word
+    // character is its trailing `=` tokenizes as `KEY=`. That "key" is a
+    // fragment of the value, and nothing downstream can catch it: the
+    // assignment path does not sanitize, sanitize could not match a fragment
+    // anyway, and scanForSecrets deliberately excludes generic base64. Same
+    // reasoning safeComment already applies to commented keys.
+    if (OPAQUE_TOKEN.test(key)) {
+      // Record it anyway, or detectSpanDisagreement reads a deliberately
+      // dropped key as a lost one and refuses the whole write.
+      emitted.add(key);
+      continue;
+    }
 
     // Preserve any custom comment from existing .env.example
     const existingEntry = existing.get(key);

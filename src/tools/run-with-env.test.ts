@@ -123,3 +123,17 @@ describe("RunWithEnvSchema - timeout_ms bounds", () => {
     expect(RunWithEnvSchema.safeParse({ ...base, timeout_ms: 5000 }).success).toBe(true);
   });
 });
+
+describe("runWithEnv - blocked .env", () => {
+  it("refuses rather than running with an empty sanitizer", async () => {
+    const { runWithEnv } = await import("./run-with-env.js");
+    mockLoadEnvChecked.mockReturnValue({ env: {}, blocked: "symlink refused" });
+
+    const result = await runWithEnv({
+      project_dir: "/fake/project",
+      command: "cat .env",
+    });
+
+    expect(result).toEqual({ error: "symlink refused" });
+  });
+});
