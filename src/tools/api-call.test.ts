@@ -8,13 +8,18 @@ vi.mock("../security/path-validator.js");
 
 const { auditLog } = await import("../security/audit.js");
 const { validateUrl } = await import("../security/url-validator.js");
-const { loadEnv } = await import("../env-loader.js");
+const { loadEnvChecked } = await import("../env-loader.js");
 const { validateProjectDir } = await import("../security/path-validator.js");
 const { apiCall, ApiCallSchema } = await import("./api-call.js");
 
 const mockAuditLog = vi.mocked(auditLog);
 const mockValidateUrl = vi.mocked(validateUrl);
-const mockLoadEnv = vi.mocked(loadEnv);
+const mockLoadEnvChecked = vi.mocked(loadEnvChecked);
+/** loadEnvChecked returns { env, blocked? }; tests only ever set env. */
+const mockLoadEnv = {
+  mockReturnValue: (env: Record<string, string>) =>
+    mockLoadEnvChecked.mockReturnValue({ env }),
+};
 const mockValidateProjectDir = vi.mocked(validateProjectDir);
 
 // Stub fetch globally
@@ -316,6 +321,153 @@ describe("apiCall - redirects", () => {
     // The second request was never made.
     expect(mockFetch).toHaveBeenCalledTimes(1);
     expect(mockAuditLog).toHaveBeenCalledWith("api_call", { status: "blocked" });
+  });
+
+  it("redacts a secret reflected back in a blocked redirect's Location", async () => {
+    // An allowed host reflects the Authorization value into its Location. The
+    // private-IP check blocks the hop before the allowlist check runs, so the
+    // block message is the channel — it must be sanitized like every other exit.
+    mockFetch.mockResolvedValueOnce(
+      reply(302, "http://127.0.0.1/callback?t=tok-secret")
+    );
+    mockValidateUrl
+      .mockResolvedValueOnce({ allowed: true, resolvedIp: "93.184.216.34" })
+      .mockResolvedValueOnce({ allowed: false, reason: "private IP blocked" });
+
+    const result = await apiCall({
+      project_dir: "/fake/project",
+      url: "https://example.com",
+      auth_env_key: "MY_TOKEN",
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.body).not.toContain("tok-secret");
+    expect(result.body).toContain("[REDACTED:MY_TOKEN]");
+  });
+
+  it("redacts a secret reflected into the redirect hostname", async () => {
+    // new URL().toString() ASCII-lowercases the host, and sanitize matches
+    // case-sensitively — so a mixed-case token reflected into the hostname
+    // survives redaction unless the message is built from the raw header.
+    mockLoadEnv.mockReturnValue({ MY_TOKEN: "Tok-SECRET-Value" });
+    mockFetch.mockResolvedValueOnce(
+      reply(302, "http://Tok-SECRET-Value.127.0.0.1.nip.io/cb")
+    );
+    mockValidateUrl
+      .mockResolvedValueOnce({ allowed: true, resolvedIp: "93.184.216.34" })
+      .mockResolvedValueOnce({ allowed: false, reason: "private IP blocked" });
+
+    const result = await apiCall({
+      project_dir: "/fake/project",
+      url: "https://example.com",
+      auth_env_key: "MY_TOKEN",
+    });
+
+    // Neither the original casing nor the URL-lowercased form may survive.
+    expect(result.body).not.toContain("Tok-SECRET-Value");
+    expect(result.body.toLowerCase()).not.toContain("tok-secret-value");
+    expect(result.body).toContain("[REDACTED:MY_TOKEN]");
+  });
+
+  it("redacts a secret carried in the validator's own reason string", async () => {
+    // The other redirect tests stub `reason` as a constant with no hostname in
+    // it, so they cannot catch a leak through that half of the message. The
+    // real reason interpolates the URL-lowercased hostname.
+    mockLoadEnv.mockReturnValue({ MY_TOKEN: "Tok-SECRET-Value" });
+    mockFetch.mockResolvedValueOnce(
+      reply(302, "http://Tok-SECRET-Value.127.0.0.1.nip.io/cb")
+    );
+    mockValidateUrl
+      .mockResolvedValueOnce({ allowed: true, resolvedIp: "93.184.216.34" })
+      .mockResolvedValueOnce({
+        allowed: false,
+        reason:
+          "Blocked: tok-secret-value.127.0.0.1.nip.io resolves to private IP 127.0.0.1",
+      });
+
+    const result = await apiCall({
+      project_dir: "/fake/project",
+      url: "https://example.com",
+      auth_env_key: "MY_TOKEN",
+    });
+
+    expect(result.body.toLowerCase()).not.toContain("tok-secret-value");
+    expect(result.body).toContain("[REDACTED:MY_TOKEN]");
+  });
+
+  it("redacts a secret reflected into a response header name", async () => {
+    mockLoadEnv.mockReturnValue({ MY_TOKEN: "tok-secret-value" });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      text: async () => "OK",
+      headers: {
+        // HTTP token chars cover most secret alphabets, so a name is a channel.
+        forEach: (fn: (v: string, k: string) => void) =>
+          fn("1", "x-echo-tok-secret-value"),
+        get: () => null,
+      },
+    });
+
+    const result = await apiCall({
+      project_dir: "/fake/project",
+      url: "https://example.com",
+      auth_env_key: "MY_TOKEN",
+    });
+
+    expect(Object.keys(result.headers).join()).not.toContain("tok-secret-value");
+  });
+
+  it("drops the Authorization header on a cross-origin redirect", async () => {
+    // No allowlist configured — the documented default. checkDestination only
+    // warns, so the allowlist cannot be the only control here.
+    mockFetch
+      .mockResolvedValueOnce(reply(302, "https://evil.example/collect"))
+      .mockResolvedValueOnce(reply(200, undefined, "ARRIVED"));
+
+    const result = await apiCall({
+      project_dir: "/fake/project",
+      url: "https://example.com",
+      auth_env_key: "MY_TOKEN",
+    });
+
+    const secondRequestHeaders = mockFetch.mock.calls[1][1].headers;
+    expect(secondRequestHeaders).not.toHaveProperty("Authorization");
+    expect(JSON.stringify(secondRequestHeaders)).not.toContain("tok-secret");
+    expect(result.warnings?.join(" ")).toMatch(/cross-origin redirect/);
+  });
+
+  it("keeps the Authorization header on a same-origin redirect", async () => {
+    mockFetch
+      .mockResolvedValueOnce(reply(302, "https://example.com/moved"))
+      .mockResolvedValueOnce(reply(200, undefined, "ARRIVED"));
+
+    await apiCall({
+      project_dir: "/fake/project",
+      url: "https://example.com",
+      auth_env_key: "MY_TOKEN",
+    });
+
+    expect(mockFetch.mock.calls[1][1].headers).toHaveProperty("Authorization");
+  });
+
+  it("returns a structured error when the body read fails mid-stream", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      text: async () => {
+        throw new Error("socket hang up");
+      },
+      headers: { forEach: vi.fn(), get: () => null },
+    });
+
+    const result = await apiCall({
+      project_dir: "/fake/project",
+      url: "https://example.com",
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.body).toContain("socket hang up");
   });
 
   it("blocks a redirect that would carry a secret off the allowlist", async () => {

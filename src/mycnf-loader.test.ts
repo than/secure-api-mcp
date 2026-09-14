@@ -69,6 +69,56 @@ describe("loadMyCnf - basic parsing", () => {
     // port is NOT a secret field
     expect(result.secrets).not.toHaveProperty("client.port");
   });
+
+  it("treats a loose- prefixed password as a secret", async () => {
+    const { loadMyCnf } = await import("./mycnf-loader.js");
+    const dir = tempDir();
+    const home = tempDir();
+    // MySQL honours `loose-` on any option, so this is a live credential.
+    writeFileSync(join(home, ".my.cnf"), "[client]\nloose-password=looseSecret\n");
+    const result = loadMyCnf(dir, home);
+    expect(result.secrets).toMatchObject({
+      "client.loose-password": "looseSecret",
+    });
+  });
+
+  it("treats a loose_ underscore prefixed password as a secret", async () => {
+    const { loadMyCnf } = await import("./mycnf-loader.js");
+    const dir = tempDir();
+    const home = tempDir();
+    // my_getopt accepts either delimiter after a special prefix.
+    writeFileSync(join(home, ".my.cnf"), "[client]\nloose_password=underscoreSecret\n");
+    const result = loadMyCnf(dir, home);
+    expect(result.secrets).toMatchObject({
+      "client.loose_password": "underscoreSecret",
+    });
+  });
+
+  it("treats an uppercase field name as a secret", async () => {
+    const { loadMyCnf } = await import("./mycnf-loader.js");
+    const dir = tempDir();
+    const home = tempDir();
+    // MySQL option names fold case.
+    writeFileSync(join(home, ".my.cnf"), "[client]\nPASSWORD=upperSecret\n");
+    const result = loadMyCnf(dir, home);
+    expect(result.secrets).toMatchObject({ "client.PASSWORD": "upperSecret" });
+  });
+
+  it("treats MySQL 8.0.27+ multifactor passwords as secrets", async () => {
+    const { loadMyCnf } = await import("./mycnf-loader.js");
+    const dir = tempDir();
+    const home = tempDir();
+    writeFileSync(
+      join(home, ".my.cnf"),
+      "[client]\nuser=root\npassword1=first\npassword2=second\npassword3=third\n"
+    );
+    const result = loadMyCnf(dir, home);
+    expect(result.secrets).toMatchObject({
+      "client.password1": "first",
+      "client.password2": "second",
+      "client.password3": "third",
+    });
+  });
 });
 
 describe("loadMyCnf - multiple sections", () => {

@@ -2,9 +2,38 @@ import { readFileSync, statSync, readdirSync, realpathSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, join, resolve, sep } from "node:path";
 import { parse } from "ini";
+import { isWithin } from "./utils/path.js";
 
-/** Fields whose values are considered secrets and fed to the sanitizer. */
-export const SECRET_FIELDS = new Set(["user", "password", "host"]);
+/**
+ * MySQL honours a `loose-` prefix on any option, and my_getopt accepts either
+ * delimiter after it, so `loose_password=` is as live a credential as
+ * `loose-password=`.
+ */
+export const LOOSE_PREFIX = /^loose[-_]/;
+
+/**
+ * Fields whose values are considered secrets and fed to the sanitizer.
+ * password1/2/3 are MySQL 8.0.27+ multifactor auth options; without them a
+ * configured `password2=` was returned verbatim despite the redaction contract.
+ */
+export const SECRET_FIELDS = new Set([
+  "user",
+  "password",
+  "password1",
+  "password2",
+  "password3",
+  "host",
+]);
+
+/**
+ * True if `field` names a credential. Normalises case and a `loose-`/`loose_`
+ * prefix first: MySQL option names fold case, so `PASSWORD=` and
+ * `Loose-Password=` are as live as their lowercase spellings, and
+ * over-redacting is the safe direction here.
+ */
+export function isSecretField(field: string): boolean {
+  return SECRET_FIELDS.has(field.toLowerCase().replace(LOOSE_PREFIX, ""));
+}
 
 export interface MyCnfResult {
   /** Map of section name to field map, e.g. { client: { user: "root", ... } } */
@@ -56,12 +85,6 @@ function readFile(path: string): { content: string; mtime: number } | null {
 }
 
 /** True if `target` resolves to `root` or a path nested under it. */
-function isWithin(root: string, target: string): boolean {
-  const r = resolve(root);
-  const t = resolve(target);
-  return t === r || t.startsWith(r + sep);
-}
-
 /**
  * Canonical (symlink-resolved) path, or null if it can't be resolved (ENOENT).
  * Used for containment checks: a lexical `resolve()` does not follow symlinks,
@@ -227,7 +250,7 @@ function extractSecrets(
   const secrets: Record<string, string> = {};
   for (const [section, fields] of Object.entries(sections)) {
     for (const [field, value] of Object.entries(fields)) {
-      if (SECRET_FIELDS.has(field)) {
+      if (isSecretField(field)) {
         secrets[`${section}.${field}`] = value;
       }
     }

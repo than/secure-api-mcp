@@ -1,7 +1,8 @@
 import { z } from "zod";
 import { isAbsolute } from "node:path";
 import { homedir } from "node:os";
-import { loadMyCnf, SECRET_FIELDS } from "../mycnf-loader.js";
+import { sanitize } from "../utils/sanitize.js";
+import { loadMyCnf } from "../mycnf-loader.js";
 import { validateProjectDir } from "../security/path-validator.js";
 import { auditLog } from "../security/audit.js";
 
@@ -25,7 +26,7 @@ export async function readMyCnf(
     return { error: pathCheck.reason! };
   }
 
-  const { sections } = loadMyCnf(args.project_dir, homedir());
+  const { sections, secrets } = loadMyCnf(args.project_dir, homedir());
 
   // Build redacted view
   const redacted: Record<string, Record<string, string>> = {};
@@ -35,11 +36,19 @@ export async function readMyCnf(
     if (args.section && sectionName !== args.section) continue;
     redacted[sectionName] = {};
     for (const [field, value] of Object.entries(fields)) {
-      if (SECRET_FIELDS.has(field)) {
+      // `secrets` is built by extractSecrets from this same `sections` object,
+      // so membership is equivalent by construction. Reusing it keeps one
+      // predicate deciding what the model sees — a second copy here would go
+      // stale the next time isSecretField learns a new alias.
+      if (Object.hasOwn(secrets, `${sectionName}.${field}`)) {
         redacted[sectionName][field] = `[REDACTED:${sectionName}.${field}]`;
         keysAccessedCount++;
       } else {
-        redacted[sectionName][field] = value;
+        // The field-name gate is a denylist over a format with plenty of other
+        // places to put a credential — `init-command` can interpolate the
+        // password, and `pager`/`ssl-key` are not in SECRET_FIELDS. One exit,
+        // one predicate: run the non-secret values through the sanitizer too.
+        redacted[sectionName][field] = sanitize(value, secrets);
       }
     }
   }

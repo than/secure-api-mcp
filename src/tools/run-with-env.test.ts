@@ -1,16 +1,21 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { loadEnv } from "../env-loader.js";
+import { loadEnvChecked } from "../env-loader.js";
 import { loadMyCnf } from "../mycnf-loader.js";
 import { validateProjectDir } from "../security/path-validator.js";
 import { auditLog } from "../security/audit.js";
 import { RunWithEnvSchema } from "./run-with-env.js";
 
-vi.mock("../env-loader.js", () => ({ loadEnv: vi.fn() }));
+vi.mock("../env-loader.js", () => ({ loadEnvChecked: vi.fn() }));
 vi.mock("../mycnf-loader.js", () => ({ loadMyCnf: vi.fn() }));
 vi.mock("../security/path-validator.js", () => ({ validateProjectDir: vi.fn() }));
 vi.mock("../security/audit.js", () => ({ auditLog: vi.fn() }));
 
-const mockLoadEnv = vi.mocked(loadEnv);
+const mockLoadEnvChecked = vi.mocked(loadEnvChecked);
+/** loadEnvChecked returns { env, blocked? }; tests only ever set env. */
+const mockLoadEnv = {
+  mockReturnValue: (env: Record<string, string>) =>
+    mockLoadEnvChecked.mockReturnValue({ env }),
+};
 const mockLoadMyCnf = vi.mocked(loadMyCnf);
 const mockValidateProjectDir = vi.mocked(validateProjectDir);
 
@@ -116,5 +121,19 @@ describe("RunWithEnvSchema - timeout_ms bounds", () => {
 
   it("accepts a positive integer timeout", () => {
     expect(RunWithEnvSchema.safeParse({ ...base, timeout_ms: 5000 }).success).toBe(true);
+  });
+});
+
+describe("runWithEnv - blocked .env", () => {
+  it("refuses rather than running with an empty sanitizer", async () => {
+    const { runWithEnv } = await import("./run-with-env.js");
+    mockLoadEnvChecked.mockReturnValue({ env: {}, blocked: "symlink refused" });
+
+    const result = await runWithEnv({
+      project_dir: "/fake/project",
+      command: "cat .env",
+    });
+
+    expect(result).toEqual({ error: "symlink refused" });
   });
 });

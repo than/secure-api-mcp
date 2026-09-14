@@ -1,7 +1,8 @@
 import { z } from "zod";
 import { isAbsolute } from "node:path";
 import { execFile } from "node:child_process";
-import { loadEnv } from "../env-loader.js";
+import { loadEnvChecked } from "../env-loader.js";
+import { isPlausibleEnvKey, omittedKeysNote } from "../utils/env-key.js";
 import { loadMyCnf } from "../mycnf-loader.js";
 import { homedir } from "node:os";
 import { sanitize } from "../utils/sanitize.js";
@@ -88,7 +89,21 @@ export async function runWithEnv(
 
   const warnings = detectCommandWarnings(args.command);
 
-  const env = loadEnv(args.project_dir);
+  // A policy refusal must be visible here too. The env is {} either way, so
+  // nothing is injected — but sanitizeSecrets is also {}, meaning a command
+  // that reads the symlinked .env itself (`cat .env`) gets unredacted output
+  // where it would previously have been scrubbed.
+  const { env, blocked: envBlocked } = loadEnvChecked(args.project_dir);
+  if (envBlocked) {
+    // Refuse rather than warn. With the read blocked, sanitizeSecrets is empty,
+    // so a command that reads the symlink itself (`cat .env`) would get output
+    // the pre-refusal code scrubbed — refusing the read would strictly reduce
+    // redaction coverage. Nothing is injected either way, so the run has no
+    // reason to proceed. api_call and get_env_keys still warn: a request and a
+    // key listing remain meaningful without secrets.
+    auditLog("run_with_env", { status: "blocked" });
+    return { error: envBlocked };
+  }
 
   // Build combined secret map for sanitization
   let sanitizeSecrets: Record<string, string> = env;
@@ -99,7 +114,21 @@ export async function runWithEnv(
 
   // Filter to requested keys if specified
   const injectedEnv: Record<string, string> = {};
-  const keys = args.env_keys ?? Object.keys(env);
+  // With env_keys unset the default is "everything", which would turn a
+  // value fragment dotenv mistook for a key into a child-process variable
+  // name. An explicit env_keys is the caller's own choice and is left alone.
+  let keys: string[];
+  if (args.env_keys) {
+    keys = args.env_keys;
+  } else {
+    keys = Object.keys(env).filter(isPlausibleEnvKey);
+    const dropped = Object.keys(env).filter((k) => !isPlausibleEnvKey(k));
+    if (dropped.length > 0) {
+      warnings.push(
+        omittedKeysNote(dropped.length, "Pass env_keys explicitly to override.")
+      );
+    }
+  }
   for (const key of keys) {
     if (key in env) {
       injectedEnv[key] = env[key];
@@ -141,7 +170,7 @@ export async function runWithEnv(
           exit_code: exitCode,
           stdout: sanitize(stdout, sanitizeSecrets),
           stderr: sanitize(stderr, sanitizeSecrets),
-          ...(warnings.length > 0 ? { warnings } : {}),
+          ...(warnings.length > 0 ? { warnings: warnings.map((w) => sanitize(w, sanitizeSecrets)) } : {}),
         });
       }
     );

@@ -38,6 +38,18 @@ describe("validateUrl - private IPv4", () => {
     expect((await validateUrl("http://192.168.1.1")).allowed).toBe(false);
   });
 
+  it("blocks 100.100.100.200 (Alibaba Cloud IMDS, CGNAT range)", async () => {
+    expect((await validateUrl("http://100.100.100.200")).allowed).toBe(false);
+  });
+
+  it("blocks both edges of 100.64.0.0/10 but not its neighbours", async () => {
+    expect((await validateUrl("http://100.64.0.0")).allowed).toBe(false);
+    expect((await validateUrl("http://100.127.255.255")).allowed).toBe(false);
+    // 100.63.x and 100.128.x are ordinary public space — must stay allowed.
+    expect((await validateUrl("http://100.63.255.255")).allowed).toBe(true);
+    expect((await validateUrl("http://100.128.0.0")).allowed).toBe(true);
+  });
+
   it("blocks 169.254.169.254 (cloud metadata)", async () => {
     expect((await validateUrl("http://169.254.169.254")).allowed).toBe(false);
   });

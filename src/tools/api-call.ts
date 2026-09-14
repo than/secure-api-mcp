@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { isAbsolute } from "node:path";
 import { Agent } from "undici";
-import { loadEnv } from "../env-loader.js";
+import { loadEnvChecked } from "../env-loader.js";
 import { sanitize } from "../utils/sanitize.js";
 import { validateUrl } from "../security/url-validator.js";
 import { validateProjectDir } from "../security/path-validator.js";
@@ -113,7 +113,11 @@ export async function apiCall(
     };
   }
 
-  const env = loadEnv(args.project_dir);
+  // Everything above this line returns before any secret is in hand: the
+  // messages interpolate pathCheck/urlCheck reasons derived from the
+  // model-supplied project_dir and url, and no env value can reach them. Any
+  // return added BELOW this line must be sanitized — see CLAUDE.md.
+  const { env, blocked: envBlocked } = loadEnvChecked(args.project_dir);
 
   const interpolated = args.headers
     ? interpolateHeaders(args.headers, env)
@@ -131,6 +135,10 @@ export async function apiCall(
   // Enforced (SECURE_API_ALLOWED_HOSTS set): block non-matching hosts.
   // Unenforced (unset): allow but warn so an unexpected destination is visible.
   const warnings: string[] = [];
+  // Surface a policy refusal from loadEnv rather than letting it look like an
+  // absent .env: without this the request goes out unauthenticated and the
+  // caller sees only a bare 401.
+  if (envBlocked) warnings.push(sanitize(envBlocked, env));
   const policy = getHostPolicy();
   const checkDestination = (host: string): string | null => {
     if (injectedKeys.size === 0) return null;
@@ -140,8 +148,14 @@ export async function apiCall(
         : `host '${host}' is not in SECURE_API_ALLOWED_HOSTS — refusing to send secrets to an unapproved destination`;
     }
     // No allowlist configured — secret still goes out, but make it visible.
+    // Sanitize at the push site, not at each exit: warnings ride along on
+    // every return, and a new exit that forgets the wrapper is exactly the
+    // failure mode this change exists to prevent.
     warnings.push(
-      `Secret(s) sent to '${host}'. Set SECURE_API_ALLOWED_HOSTS to restrict where secrets may be sent.`
+      sanitize(
+        `Secret(s) sent to '${host}'. Set SECURE_API_ALLOWED_HOSTS to restrict where secrets may be sent.`,
+        env
+      )
     );
     return null;
   };
@@ -149,7 +163,7 @@ export async function apiCall(
   const blocked = checkDestination(new URL(args.url).hostname);
   if (blocked) {
     auditLog("api_call", { status: "blocked" });
-    return { status: 0, headers: {}, body: `Request blocked: ${blocked}` };
+    return { status: 0, headers: {}, body: sanitize(`Request blocked: ${blocked}`, env) };
   }
 
   const controller = new AbortController();
@@ -171,6 +185,7 @@ export async function apiCall(
         });
 
   let response: Response;
+  let bodyText: string;
   let currentUrl = args.url;
   let currentIp = urlCheck.resolvedIp;
   let method: string = args.method;
@@ -203,7 +218,9 @@ export async function apiCall(
         return {
           status: 0,
           headers: {},
-          body: `Request blocked: exceeded ${MAX_REDIRECTS} redirects`,
+          // Constant today, but it sits below the loadEnv marker — wrapping it
+          // keeps "a `body:` without `sanitize(`" a mechanical check.
+          body: sanitize(`Request blocked: exceeded ${MAX_REDIRECTS} redirects`, env),
           ...(warnings.length > 0 ? { warnings } : {}),
         };
       }
@@ -215,7 +232,18 @@ export async function apiCall(
         return {
           status: 0,
           headers: {},
-          body: `Request blocked: redirect to ${nextUrl} — ${nextCheck.reason}`,
+          // nextUrl comes from the remote Location header and can carry a
+          // reflected request header; nextCheck.reason interpolates the
+          // hostname. Both reach the model, so sanitize like every other exit.
+          // Built from the raw Location header rather than nextUrl, which has been
+          // through `new URL()` and so is normalized (host lowercased, escapes
+          // rewritten). Report what the server actually sent.
+          body: sanitize(
+            // Raw header plus resolved URL: a relative `Location: /cb` says
+            // nothing on its own, and some reason branches carry no host.
+            `Request blocked: redirect to ${location} (${nextUrl}) — ${nextCheck.reason}`,
+            env
+          ),
           ...(warnings.length > 0 ? { warnings } : {}),
         };
       }
@@ -226,15 +254,59 @@ export async function apiCall(
         return {
           status: 0,
           headers: {},
-          body: `Request blocked: redirect to ${nextBlocked}`,
+          body: sanitize(`Request blocked: redirect to ${location} (${nextUrl}) — ${nextBlocked}`, env),
           ...(warnings.length > 0 ? { warnings } : {}),
         };
+      }
+
+      // Drop injected secrets on a cross-origin hop, independently of the
+      // allowlist. The first hop's destination was chosen by the model; a
+      // redirect target is attacker-controlled response data, and with
+      // SECURE_API_ALLOWED_HOSTS unset — the documented default —
+      // checkDestination only warns. curl and browsers strip Authorization on
+      // cross-origin redirect for exactly this reason. This makes the
+      // allowlist a narrowing control rather than the only control.
+      if (new URL(nextUrl).origin !== new URL(currentUrl).origin) {
+        const dropped: string[] = [];
+        for (const name of Object.keys(headers)) {
+          if (name.toLowerCase() === "authorization") {
+            delete headers[name];
+            dropped.push(name);
+          }
+        }
+        for (const [name, value] of Object.entries(headers)) {
+          if ([...injectedKeys].some((k) => env[k] && value.includes(env[k]))) {
+            delete headers[name];
+            dropped.push(name);
+          }
+        }
+        if (dropped.length > 0) {
+          // Nothing sensitive rides on from here: only headers are
+          // interpolated, and every header carrying an injected value was just
+          // removed. Leaving injectedKeys populated would make the next hop
+          // report "Secret(s) sent to ..." for a request that carries none,
+          // and would block a further hop as secret-bearing when it is not.
+          injectedKeys.clear();
+          warnings.push(
+            sanitize(
+              `Dropped ${dropped.join(", ")} on cross-origin redirect to ` +
+                `'${new URL(nextUrl).hostname}'; secrets are not forwarded to a ` +
+                `host the remote server chose.`,
+              env
+            )
+          );
+        }
       }
 
       ({ method, body } = redirectedRequest(response.status, method, body));
       currentUrl = nextUrl;
       currentIp = nextCheck.resolvedIp;
     }
+    // Read the body inside the try. Outside it the timer has already been
+    // cleared — so timeout_ms bounded time-to-headers only and a trickled body
+    // stalled indefinitely — and a mid-stream reset rejected past every
+    // sanitize call, past auditLog, and past the warnings.
+    bodyText = await response.text();
   } catch (err) {
     auditLog("api_call", { status: "error" });
     const message =
@@ -253,10 +325,12 @@ export async function apiCall(
     clearTimeout(timer);
   }
 
-  const bodyText = await response.text();
   const responseHeaders: Record<string, string> = {};
   response.headers.forEach((value, key) => {
-    responseHeaders[key] = sanitize(value, env);
+    // Names as well as values: HTTP token characters cover most secret
+    // alphabets, so a server can reflect a request header into a response
+    // header *name*.
+    responseHeaders[sanitize(key, env)] = sanitize(value, env);
   });
 
   // injectedKeys already holds the unique env keys whose values were actually

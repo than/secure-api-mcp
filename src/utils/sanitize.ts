@@ -1,5 +1,16 @@
 import { scanForSecrets } from "../security/scanner.js";
 
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function replaceCaseInsensitive(text: string, needle: string, tag: string): string {
+  // A function replacement, not a string: `$&` / `$1` inside `tag` would
+  // otherwise be substitution patterns, and `tag` is built from a key name —
+  // mycnf secrets are keyed `section.field` straight out of the ini parse.
+  return text.replace(new RegExp(escapeRegExp(needle), "gi"), () => tag);
+}
+
 export function sanitize(
   text: string,
   env: Record<string, string>
@@ -14,19 +25,24 @@ export function sanitize(
   for (const [key, value] of replacements) {
     const tag = `[REDACTED:${key}]`;
 
-    // Match the literal secret value
-    result = result.split(value).join(tag);
+    // Match the literal secret value, case-insensitively. Callers routinely
+    // hand us text that has passed through `new URL()`, which ASCII-lowercases
+    // the host component — so a token reflected into a hostname reaches here
+    // case-folded and a case-sensitive match would miss it entirely.
+    result = replaceCaseInsensitive(result, value, tag);
 
-    // Match base64-encoded form
+    // Match base64-encoded form. Exact: base64's alphabet is case-significant,
+    // so folding case here would both miss and over-match.
     const b64 = Buffer.from(value).toString("base64");
     if (b64.length > 4) {
       result = result.split(b64).join(tag);
     }
 
-    // Match URL-encoded form
+    // Match URL-encoded form. Percent escapes are hex, so case-insensitive is
+    // safe and catches %2F as readily as %2f.
     const urlEncoded = encodeURIComponent(value);
     if (urlEncoded !== value) {
-      result = result.split(urlEncoded).join(tag);
+      result = replaceCaseInsensitive(result, urlEncoded, tag);
     }
   }
 
