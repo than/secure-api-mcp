@@ -8,13 +8,18 @@ vi.mock("../security/path-validator.js");
 
 const { auditLog } = await import("../security/audit.js");
 const { validateUrl } = await import("../security/url-validator.js");
-const { loadEnv } = await import("../env-loader.js");
+const { loadEnvChecked } = await import("../env-loader.js");
 const { validateProjectDir } = await import("../security/path-validator.js");
 const { apiCall, ApiCallSchema } = await import("./api-call.js");
 
 const mockAuditLog = vi.mocked(auditLog);
 const mockValidateUrl = vi.mocked(validateUrl);
-const mockLoadEnv = vi.mocked(loadEnv);
+const mockLoadEnvChecked = vi.mocked(loadEnvChecked);
+/** loadEnvChecked returns { env, blocked? }; tests only ever set env. */
+const mockLoadEnv = {
+  mockReturnValue: (env: Record<string, string>) =>
+    mockLoadEnvChecked.mockReturnValue({ env }),
+};
 const mockValidateProjectDir = vi.mocked(validateProjectDir);
 
 // Stub fetch globally

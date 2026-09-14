@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { isAbsolute } from "node:path";
 import { Agent } from "undici";
-import { loadEnv } from "../env-loader.js";
+import { loadEnvChecked } from "../env-loader.js";
 import { sanitize } from "../utils/sanitize.js";
 import { validateUrl } from "../security/url-validator.js";
 import { validateProjectDir } from "../security/path-validator.js";
@@ -117,7 +117,7 @@ export async function apiCall(
   // messages interpolate pathCheck/urlCheck reasons derived from the
   // model-supplied project_dir and url, and no env value can reach them. Any
   // return added BELOW this line must be sanitized — see CLAUDE.md.
-  const env = loadEnv(args.project_dir);
+  const { env, blocked: envBlocked } = loadEnvChecked(args.project_dir);
 
   const interpolated = args.headers
     ? interpolateHeaders(args.headers, env)
@@ -135,6 +135,10 @@ export async function apiCall(
   // Enforced (SECURE_API_ALLOWED_HOSTS set): block non-matching hosts.
   // Unenforced (unset): allow but warn so an unexpected destination is visible.
   const warnings: string[] = [];
+  // Surface a policy refusal from loadEnv rather than letting it look like an
+  // absent .env: without this the request goes out unauthenticated and the
+  // caller sees only a bare 401.
+  if (envBlocked) warnings.push(envBlocked);
   const policy = getHostPolicy();
   const checkDestination = (host: string): string | null => {
     if (injectedKeys.size === 0) return null;

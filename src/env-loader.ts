@@ -2,6 +2,13 @@ import { readFileSync, statSync, openSync, closeSync, realpathSync, constants } 
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { parse } from "dotenv";
+import { auditLog } from "./security/audit.js";
+
+export interface LoadEnvResult {
+  env: Record<string, string>;
+  /** Set when a policy decision — not a missing file — produced an empty env. */
+  blocked?: string;
+}
 
 interface CacheEntry {
   mtime: number;
@@ -12,6 +19,18 @@ interface CacheEntry {
 const cache = new Map<string, CacheEntry>();
 
 export function loadEnv(projectDir: string): Record<string, string> {
+  return loadEnvChecked(projectDir).env;
+}
+
+/**
+ * As `loadEnv`, but distinguishes "refused by policy" from "no .env here".
+ * A refusal otherwise disappears: the tools see an empty env, skip injection,
+ * skip the allowlist check (nothing was injected), and send the request with
+ * the placeholder left literal — so the caller gets a bare 401 and no reason,
+ * including when it was their own `.env -> ~/shared/project.env` layout that
+ * tripped the policy rather than an attack.
+ */
+export function loadEnvChecked(projectDir: string): LoadEnvResult {
   const envPath = join(projectDir, ".env");
 
   // Read the file first, then stat — avoids TOCTOU race where file
@@ -32,7 +51,12 @@ export function loadEnv(projectDir: string): Record<string, string> {
       const realEnv = realpathSync(envPath);
       const realProject = realpathSync(projectDir);
       if (!realEnv.startsWith(realProject + "/") && realEnv !== realProject) {
-        return {};
+        auditLog("load_env", { status: "blocked" });
+        return {
+          env: {},
+          blocked:
+            ".env is a symlink pointing outside the project directory; refusing to read it",
+        };
       }
       fd = openSync(realEnv, constants.O_RDONLY);
     }
@@ -42,7 +66,7 @@ export function loadEnv(projectDir: string): Record<string, string> {
       closeSync(fd);
     }
   } catch {
-    return {};
+    return { env: {} };
   }
 
   let mtime: number;
@@ -50,7 +74,7 @@ export function loadEnv(projectDir: string): Record<string, string> {
     mtime = statSync(envPath).mtimeMs;
   } catch {
     // File was deleted between read and stat — use what we read
-    return parse(content);
+    return { env: parse(content) };
   }
 
   // Hash the content so identical-mtime replacements (coarse clock,
@@ -59,12 +83,12 @@ export function loadEnv(projectDir: string): Record<string, string> {
 
   const cached = cache.get(envPath);
   if (cached && cached.mtime === mtime && cached.contentHash === contentHash) {
-    return cached.env;
+    return { env: cached.env };
   }
 
   const env = parse(content);
   cache.set(envPath, { mtime, contentHash, env });
-  return env;
+  return { env };
 }
 
 export function getEnvPath(projectDir: string): string {

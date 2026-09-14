@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { mkdtempSync, writeFileSync, symlinkSync, rmSync, readFileSync, lstatSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { syncExample } from "./sync-example.js";
+import { syncExample, detectSpanDisagreement } from "./sync-example.js";
 
 function makeTempProject(): string {
   const dir = mkdtempSync(join(tmpdir(), "secure-api-test-"));
@@ -366,7 +366,7 @@ describe("syncExample - multi-line values", () => {
     expect(out).not.toContain("SECRETMARKER");
   });
 
-  it("refuses to write a lossy file when a quote is unterminated", async () => {
+  it("recovers an unterminated quote the way dotenv does", async () => {
     const project = tempProject();
     writeFileSync(join(project, ".env.example"), "API_HOST=example.com\nPORT=3000\n");
     // Genuinely unterminated: no closing quote anywhere. dotenv recovers via
@@ -387,7 +387,7 @@ describe("syncExample - multi-line values", () => {
     expect(out).not.toContain("still open");
   });
 
-  it("refuses a lossy write even when .env repeats a key", async () => {
+  it("handles a repeated key alongside an unclosed quote", async () => {
     const project = tempProject();
     writeFileSync(join(project, ".env.example"), "A=1\nFOO=x\nBAR=3\n");
     // The duplicate A would buy one unit of slack in a count-based guard,
@@ -531,6 +531,43 @@ describe("syncExample - multi-line values", () => {
     expect(out).not.toContain("hunter2-prod-9f3a");
   });
 
+  it("regenerates a quoted credential URL identical to the live value", async () => {
+    const project = tempProject();
+    // dotenv's capture keeps the quotes, so an unquote-less check sees a
+    // string new URL() rejects and lets the credential through.
+    const line = 'DATABASE_URL="postgres://admin:s3cret@db.internal/app"';
+    writeFileSync(join(project, ".env"), line + "\n");
+    writeFileSync(join(project, ".env.example"), line + "\n");
+
+    await syncExample({ project_dir: project });
+    const out = readFileSync(join(project, ".env.example"), "utf-8");
+
+    expect(out).not.toContain("s3cret");
+  });
+
+  it("regenerates an opaque token identical to the live value", async () => {
+    const project = tempProject();
+    // MAILGUN_SENDING misses SECRET_KEY_TOKENS, the scanner knows no Mailgun
+    // prefix, and it is not a URL — the value shape is the only signal.
+    const line = "MAILGUN_SENDING=8f3a9c2e1b7d40561122";
+    writeFileSync(join(project, ".env"), line + "\n");
+    writeFileSync(join(project, ".env.example"), line + "\n");
+
+    await syncExample({ project_dir: project });
+    const out = readFileSync(join(project, ".env.example"), "utf-8");
+
+    expect(out).not.toContain("8f3a9c2e1b7d40561122");
+  });
+
+  it("keeps a quoted port rather than blanking it", async () => {
+    const project = tempProject();
+    writeFileSync(join(project, ".env"), 'PORT="3000"\n');
+
+    await syncExample({ project_dir: project });
+
+    expect(readFileSync(join(project, ".env.example"), "utf-8")).toContain("3000");
+  });
+
   it("redacts a non-brand credential parked in a comment", async () => {
     const project = tempProject();
     // scanForSecrets only knows well-known prefixes; this one has no brand.
@@ -661,5 +698,49 @@ describe("syncExample - placeholder reuse", () => {
     const out = readFileSync(join(project, ".env.example"), "utf-8");
 
     expect(out).not.toContain("fromlastrun");
+  });
+});
+
+describe("detectSpanDisagreement", () => {
+  const span = (over: Partial<Parameters<typeof detectSpanDisagreement>[0][0]> = {}) => ({
+    key: "BLOB",
+    exportPrefix: "",
+    value: '"opening',
+    startLine: 0,
+    endLine: 0,
+    ...over,
+  });
+
+  it("refuses when a value dotenv spans across lines was scanned as one", () => {
+    // The direction that leaks: continuation lines fall outside `consumed`,
+    // reach the comment path, and sanitize cannot match a value fragment.
+    const result = detectSpanDisagreement(
+      [span()],
+      { BLOB: "line1\n# DB_PASSWORD=hunter2\nline3" },
+      new Set(["BLOB"])
+    );
+    expect(result).toMatch(/spans lines per dotenv/);
+  });
+
+  it("allows a single-line value whose \\n escape expands to a newline", () => {
+    expect(
+      detectSpanDisagreement(
+        [span({ value: '"a\\nb"' })],
+        { BLOB: "a\nb" },
+        new Set(["BLOB"])
+      )
+    ).toBeNull();
+  });
+
+  it("refuses when a parsed key was never emitted", () => {
+    expect(
+      detectSpanDisagreement([span()], { BLOB: "v", PORT: "3000" }, new Set(["BLOB"]))
+    ).toMatch(/were not emitted \(PORT\)/);
+  });
+
+  it("passes when the scan and the parser agree", () => {
+    expect(
+      detectSpanDisagreement([span({ value: "v" })], { BLOB: "v" }, new Set(["BLOB"]))
+    ).toBeNull();
   });
 });

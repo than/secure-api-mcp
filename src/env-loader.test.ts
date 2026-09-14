@@ -72,6 +72,23 @@ describe("loadEnv - symlink handling", () => {
     expect(loadEnv(project)).toEqual({});
   });
 
+  it("reports the refusal rather than looking like a missing .env", async () => {
+    const { loadEnvChecked } = await import("./env-loader.js");
+    const project = tempDir();
+    const outside = tempDir();
+    writeFileSync(join(outside, "credentials"), "K=v\n");
+    symlinkSync(join(outside, "credentials"), join(project, ".env"));
+
+    const result = loadEnvChecked(project);
+    expect(result.env).toEqual({});
+    expect(result.blocked).toMatch(/symlink/i);
+  });
+
+  it("reports no refusal when there is simply no .env", async () => {
+    const { loadEnvChecked } = await import("./env-loader.js");
+    expect(loadEnvChecked(tempDir()).blocked).toBeUndefined();
+  });
+
   it("still reads a .env symlinked within the project", async () => {
     const { loadEnv } = await import("./env-loader.js");
     const project = tempDir();

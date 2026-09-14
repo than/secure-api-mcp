@@ -76,6 +76,24 @@ const SINGLE_ASSIGN = /^\s*(export\s+)?([\w.-]+)(?:\s*=\s*?|:\s+?)/;
 /** Commented-out assignment, e.g. `# OLD_API_KEY=sk_live_...`. */
 const COMMENTED_ASSIGN = /^(\s*#+\s*)((?:export\s+)?[\w.-]+)(\s*=\s*|:\s+)(.*)$/;
 
+/**
+ * dotenv captures a value with its surrounding quotes and strips them later,
+ * so every check here has to unquote first — otherwise `new URL()` throws on
+ * the leading quote, `/^https?:/` misses, and a quoted credential URL walks
+ * through all of it.
+ */
+function unquote(v: string): string {
+  return v.replace(/^(['"`])([\s\S]*)\1$/, "$2");
+}
+
+/**
+ * Values safe to keep when the stored placeholder is byte-identical to the
+ * live one: short, word-shaped, no separators — `production`, `debug`, `info`.
+ * An opaque token (`8f3a9c2e1b7d40561122`) or anything longer is assumed to be
+ * the leaked value itself.
+ */
+const ECHOABLE_VALUE = /^[a-z0-9][a-z0-9._-]{0,15}$/i;
+
 /** Screaming snake with at least one underscore — `DB_PASSWORD`, not `TODO`. */
 const ENV_VAR_SHAPED = /^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$/;
 
@@ -95,10 +113,13 @@ interface Assignment {
  * re-reading the text.
  */
 function scanAssignments(content: string): Assignment[] {
+  // Matches are non-overlapping and left-to-right, so the newline count is
+  // carried forward rather than rescanned from 0 for each span.
+  let scanned = 0;
+  let newlines = 0;
   const countNewlines = (upTo: number) => {
-    let n = 0;
-    for (let i = 0; i < upTo; i++) if (content[i] === "\n") n++;
-    return n;
+    for (; scanned < upTo; scanned++) if (content[scanned] === "\n") newlines++;
+    return newlines;
   };
 
   const out: Assignment[] = [];
@@ -203,6 +224,46 @@ function parseExistingExample(
   return map;
 }
 
+/**
+ * Bidirectional backstop against the span scan and `parse()` disagreeing.
+ * A lost key means the scan over-consumed; the dangerous direction is the
+ * other one — if it closes a value earlier than `parse()` does, the
+ * continuation lines fall outside `consumed`, reach the comment path, and
+ * `sanitize` cannot catch a fragment of a value. `dotenv` is a caret range, so
+ * LINE can retune under us with no signal here.
+ *
+ * Exported because it is unreachable by input today, by construction: the
+ * regex is a verbatim copy. Untestable and untested are different things.
+ */
+export function detectSpanDisagreement(
+  assignments: Assignment[],
+  envValues: Record<string, string>,
+  emitted: Set<string>
+): string | null {
+  for (const a of assignments) {
+    if (a.endLine > a.startLine) continue;
+    const parsed = envValues[a.key];
+    if (parsed === undefined || !parsed.includes("\n")) continue;
+    // A single-line `KEY="a\nb"` expands to a real newline; not a narrowing.
+    if (/\\[nr]/.test(a.value)) continue;
+    return (
+      `Refusing to write .env.example: the value of ${a.key} spans lines per ` +
+      `dotenv but was scanned as one line. The parser and the span scan ` +
+      `disagree; .env was not transcribed.`
+    );
+  }
+
+  const missing = Object.keys(envValues).filter((k) => !emitted.has(k));
+  if (missing.length > 0) {
+    return (
+      `Refusing to write .env.example: ${missing.length} key(s) parsed from ` +
+      `.env were not emitted (${missing.slice(0, 3).join(", ")}). A quote in ` +
+      `.env is probably unterminated.`
+    );
+  }
+  return null;
+}
+
 export async function syncExample(
   args: z.infer<typeof SyncExampleSchema>
 ): Promise<{ path: string; keys_synced: number } | { error: string }> {
@@ -236,7 +297,7 @@ export async function syncExample(
       auditLog("sync_env_example", { status: "blocked" });
       return { error: "Refusing to read .env: symlink points outside project directory" };
     }
-    fd = openSync(realEnv, constants.O_RDONLY);
+    fd = openSync(realEnv, constants.O_RDONLY | constants.O_NOFOLLOW);
   }
   try {
     envContent = readFileSync(fd, "utf-8");
@@ -323,26 +384,25 @@ export async function syncExample(
     // miss (a rotated secret, or quoting drift between .env and .env.example).
     // Non-sensitive keys keep their curated placeholder as before.
     const existingEntry = existing.get(key);
-    const generated = smartPlaceholder(key, value);
+    const bareValue = unquote(value);
+    const storedPlaceholder = unquote(existingEntry?.placeholder ?? "");
+    const generated = smartPlaceholder(key, bareValue);
     const reusable =
       existingEntry !== undefined &&
       !SECRET_KEY_TOKENS.test(key) &&
       // A stored placeholder that scans as a secret, or carries URL
       // credentials, is a leaked value from an earlier run — regenerate.
-      scanForSecrets(existingEntry.placeholder) === existingEntry.placeholder &&
-      !hasUrlCredentials(existingEntry.placeholder) &&
-      // Residual case CLAUDE.md warns SECRET_KEY_TOKENS will miss:
-      // SLACK_WEBHOOK=https://hooks.slack.com/services/T00/B00/XXXX clears the
-      // key regex, the scanner and hasUrlCredentials, yet a stored copy
-      // byte-identical to the live value is that value. Regenerate only when
-      // this tool has an opinion of its own that differs — a blank generated
-      // placeholder means no opinion, which is what keeps a curated
-      // APP_ENV=production intact.
-      !(
-        generated !== "" &&
-        generated !== value &&
-        existingEntry.placeholder === value
-      );
+      scanForSecrets(storedPlaceholder) === storedPlaceholder &&
+      !hasUrlCredentials(storedPlaceholder) &&
+      // A stored copy byte-identical to the live value IS that value. An empty
+      // `generated` is not "no opinion" — it is smartPlaceholder's strongest
+      // refusal, so requiring a non-empty one here would permit reuse exactly
+      // where the tool has judged the value unsafe to echo. Test the value
+      // shape instead: keep a curated `APP_ENV=production`, regenerate an
+      // opaque `MAILGUN_SENDING=8f3a9c2e1b7d40561122` and a quoted
+      // `DATABASE_URL="postgres://admin:s3cret@host/db"`, neither of which
+      // SECRET_KEY_TOKENS or the scanner names.
+      (storedPlaceholder !== bareValue || ECHOABLE_VALUE.test(bareValue));
     const placeholder = reusable ? existingEntry!.placeholder : generated;
 
     // Preserve any custom comment from existing .env.example
@@ -366,15 +426,10 @@ export async function syncExample(
   // Compare membership rather than counts: a `.env` that repeats a key emits
   // more lines than validKeys has entries, and a count check would spend that
   // slack covering for a key that really was dropped.
-  const missing = [...validKeys].filter((k) => !emitted.has(k));
-  if (missing.length > 0) {
+  const disagreement = detectSpanDisagreement(assignments, envValues, emitted);
+  if (disagreement !== null) {
     auditLog("sync_env_example", { status: "blocked" });
-    return {
-      error:
-        `Refusing to write .env.example: ${missing.length} key(s) parsed from .env ` +
-        `were not emitted (${missing.slice(0, 3).join(", ")}). A quote in .env is ` +
-        `probably unterminated.`,
-    };
+    return { error: disagreement };
   }
 
   // The temp path is predictable, so a committed `.env.example.tmp` symlink
